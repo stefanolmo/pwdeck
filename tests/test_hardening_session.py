@@ -106,3 +106,62 @@ def test_window_locks_on_suspend_and_respects_setting(win, app, private_bus):   
     _emit(addr, "/org/freedesktop/login1", "org.freedesktop.login1.Manager.PrepareForSleep", "boolean:true")
     assert _pump(app, lambda: win.vault is None)
     assert win.stack.currentIndex() == 0 and win.list.topLevelItemCount() == 0
+
+
+# ------------------------------------------------------------------ suspend inhibitor
+@pytest.fixture
+def fake_logind(private_bus):
+    addr, conn = private_bus
+    p = subprocess.Popen([sys.executable, os.path.join(os.path.dirname(__file__), "helpers", "fake_logind.py"), addr],
+                         stdout=subprocess.PIPE, text=True)
+    assert p.stdout.readline().strip() == "ready"
+    from PySide6.QtDBus import QDBusInterface
+    iface = QDBusInterface("org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager", conn)
+    held = lambda: int(iface.call("Held").arguments()[0])          # noqa: E731
+    yield addr, conn, held
+    p.terminate()
+    p.wait()
+
+
+def test_inhibitor_lifecycle_locks_before_releasing(app, fake_logind):
+    addr, conn, held = fake_logind
+    w = SessionWatcher(buses={"system": conn, "session": conn})
+    assert w.inhibiting and held() == 1                      # delay inhibitor taken at start
+    seen = {}
+    w.lockRequested.connect(lambda reason: seen.update(reason=reason, held_while_locking=held(), inhibiting=w.inhibiting))
+    _emit(addr, "/org/freedesktop/login1", "org.freedesktop.login1.Manager.PrepareForSleep", "boolean:true")
+    assert _pump(app, lambda: "reason" in seen and not w.inhibiting)
+    assert seen == {"reason": "suspend", "held_while_locking": 1, "inhibiting": True}    # still held WHILE the vault locks
+    _pump(app, lambda: False, 0.3)
+    assert held() == 0                                       # released only afterwards: logind may now suspend
+    _emit(addr, "/org/freedesktop/login1", "org.freedesktop.login1.Manager.PrepareForSleep", "boolean:false")
+    assert _pump(app, lambda: w.inhibiting) and held() == 1  # resume: armed again
+    w.close()
+    _pump(app, lambda: False, 0.3)
+    assert held() == 0 and not w.inhibiting
+
+
+def test_inhibitor_released_even_if_lock_handler_raises(app, fake_logind):
+    addr, conn, held = fake_logind
+    w = SessionWatcher(buses={"system": conn, "session": conn})
+    w.lockRequested.connect(lambda r: 1 / 0)
+    w.dbusSleep(True)                                         # PySide prints the slot error but must not keep the system waiting
+    assert not w.inhibiting
+    w.close()
+
+
+def test_inhibitor_injected_fd_is_closed(app):
+    r, wfd = os.pipe()
+    os.close(r)
+    w = SessionWatcher(buses={"system": _Dead(), "session": _Dead()}, inhibit=lambda: wfd)
+    assert not w.inhibiting                                   # no PrepareForSleep connection -> nothing taken
+    w.take_inhibitor()
+    assert w.inhibiting
+    w.release_inhibitor()
+    with pytest.raises(OSError):
+        os.fstat(wfd)
+
+
+class _Dead:
+    def isConnected(self):
+        return False

@@ -245,6 +245,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, ev) -> None:
         self._running = False
+        self.watcher.close()
         if self.vault:
             self.clip.clear()
             self._maybe_backup()

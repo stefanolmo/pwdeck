@@ -39,7 +39,7 @@ a 25-entry **history** of previous secrets, and goes to the **trash** before bei
 | Unlock | master password **+ optional keyfile** (second factor) **+ recovery key** (printed once at creation) |
 | Generator | CSPRNG, length 8–128, character classes, no look-alikes, guaranteed one char per class, strength meter |
 | Clipboard | auto-clear after N seconds (only if it still holds *your* value), asks clipboard managers (KDE/Klipper) not to record it |
-| Auto-lock | after N idle minutes, optionally on minimize, and **when the screen locks or the PC suspends** (systemd-logind, KDE/GNOME lock screen over D-Bus; on by default); the key is dropped from the app on lock |
+| Auto-lock | after N idle minutes, optionally on minimize, and **when the screen locks or the PC suspends** (systemd-logind with a delay inhibitor, KDE/GNOME lock screen, over D-Bus; on by default); the key is dropped from the app on lock |
 | Process hardening | at startup `prctl(PR_SET_DUMPABLE, 0)` + `RLIMIT_CORE=0`: no core dumps, and other processes of the same user cannot read the app's memory via ptrace / `/proc/PID/mem` (opt out for debugging: `PWDECK_ALLOW_DUMP=1`) |
 | Search | all words must match across name, username, URL, tags, folder, description (secure-note bodies are not searched) |
 | Audit | weak, reused, old, expired passwords; optional online breach check (Have I Been Pwned *k-anonymity*: only 5 hash chars leave the PC, on explicit click) |
@@ -87,7 +87,8 @@ header: scrypt params + salt, key slots {password, recovery} = AES-GCM-wrapped D
 * **Not SQLCipher.** The file is not a SQLCipher database: it is an authenticated container around a normal SQLite image. The trade-offs: no extra native
   dependency, one authenticated blob, but the whole database is loaded in RAM and rewritten on each save (fine for thousands of entries, not for gigabytes).
 * **Hardening limits**: `PR_SET_DUMPABLE=0` does not stop root, a kernel exploit, or malware that injects code through your launcher/environment, and the sleep lock
-  relies on the desktop emitting the signal before suspending (no inhibitor lock is taken: the lock itself takes milliseconds, but it is not guaranteed).
+  relies on the desktop/logind emitting the signals. Suspend is covered by a logind *delay inhibitor*: the app holds it, locks the vault when `PrepareForSleep` arrives and only then lets suspend proceed
+  (logind waits at most `InhibitDelayMaxSec`, 5 s by default). Tested against a fake logind, not a real suspend.
 * **Limits you should know about**: Python cannot reliably wipe secrets from memory, so while the vault is unlocked a process-memory dump
   can reveal them; a keylogger or malware running as your user defeats any local password manager; the clipboard is readable by other
   programs until it is cleared. The strength meter is a heuristic. This code has **not been independently audited**.

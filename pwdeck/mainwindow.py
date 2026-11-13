@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QInputDia
 from . import __version__, backup, importers, theme
 from .detail import TYPE_ICON, DetailPanel
 from .dialogs import AuditDialog, GeneratorDialog, HistoryDialog, ItemDialog, SettingsDialog, fmt_ts
+from .sessionwatch import SessionWatcher
 from .startdialogs import UnlockDialog
 from .theme import icon
 from .types import TYPE_ORDER, type_label
@@ -38,6 +39,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_toolbar()
         QApplication.instance().installEventFilter(self)
+        self.watcher = SessionWatcher(self)
+        self.watcher.lockRequested.connect(self._system_lock)
         self._idle = QTimer(self, interval=2000)
         self._idle.timeout.connect(self._check_idle)
         self._idle.start()
@@ -223,6 +226,11 @@ class MainWindow(QMainWindow):
         mins = int(self.qs.value("autolock_min", 5))
         if self.vault and mins > 0 and time.time() - self._last_activity > mins * 60:
             self.lock()
+
+    def _system_lock(self, reason: str) -> None:
+        if self.vault and str(self.qs.value("lock_on_suspend", True)).lower() in ("true", "1"):
+            self.lock()
+            self.statusBar().showMessage(f"Locked ({reason})", 8000)
 
     def eventFilter(self, obj, ev) -> bool:
         if ev.type() in (QEvent.MouseButtonPress, QEvent.KeyPress, QEvent.MouseMove, QEvent.Wheel):

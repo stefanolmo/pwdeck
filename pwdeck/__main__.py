@@ -8,6 +8,7 @@ from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 
 from . import __version__, theme
+from .hardening import harden
 from .mainwindow import APP_NAME, MainWindow
 from .splash import SplashScreen
 
@@ -18,6 +19,11 @@ def main(argv=None) -> int:
     ap.add_argument("--no-splash", action="store_true", help="do not show the splash screen (or PWDECK_NO_SPLASH=1)")
     ap.add_argument("--version", action="version", version=f"pwdeck {__version__}")
     args = ap.parse_args(argv)
+    rep = harden()                      # before Qt and before any secret exists in memory
+    if rep["skipped"]:
+        print(f"pwdeck: process hardening skipped ({rep['skipped']})", file=sys.stderr)
+    elif not rep["dumpable_disabled"] and sys.platform.startswith("linux"):
+        print("pwdeck: warning: could not disable memory dumps (PR_SET_DUMPABLE)", file=sys.stderr)
 
     app = QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)

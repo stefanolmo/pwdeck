@@ -327,3 +327,20 @@ def test_detail_panel_lists_attachments_and_duplicate_copies_them(win, tmp_path,
     copy = next(i for i in win.vault.items() if i.name.endswith("(copy)"))
     (a,) = win.vault.attachments(copy.id)
     assert win.vault.get_attachment(a["id"]) == ("a.txt", b"AAA")
+
+
+def test_generator_dialog_passphrase_mode_and_persistence(app, qs):
+    d = GeneratorDialog(qs)
+    d.mode.setCurrentIndex(d.mode.findData("words"))
+    d.words.setValue(7)
+    d.sep.setCurrentIndex(d.sep.findData("."))
+    d.lang.setCurrentIndex(d.lang.findData("it"))
+    d.cap.setChecked(True)
+    pw = d.password()
+    assert pw.count(".") == 6 and all(w[0].isupper() for w in pw.split("."))
+    assert d.pass_box.isHidden() is False and d.char_box.isHidden() is True
+    assert "Entropy" in d.note.text() and d.bar.bits > 80
+    d2 = GeneratorDialog(qs)                                   # remembered
+    assert d2.mode.currentData() == "words" and d2.words.value() == 7 and d2.sep.currentData() == "." and d2.lang.currentData() == "it"
+    d2.mode.setCurrentIndex(d2.mode.findData("chars"))
+    assert len(d2.password()) == d2.spin.value() and not d2.char_box.isHidden()

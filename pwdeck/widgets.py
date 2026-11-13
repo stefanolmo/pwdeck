@@ -52,6 +52,12 @@ class StrengthBar(QWidget):
         self.bits, self.score = generator.estimate(pw)
         self.update()
 
+    def set_bits(self, bits: float) -> None:
+        """For output whose entropy is known exactly (generator), instead of the heuristic estimate."""
+        self._empty = False
+        self.bits, self.score = bits, generator.score_from_bits(bits)
+        self.update()
+
     def paintEvent(self, _ev) -> None:
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)

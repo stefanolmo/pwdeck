@@ -38,19 +38,30 @@ def load_gen_options(qs: QSettings) -> generator.GenOptions:
 
 # ------------------------------------------------------------------------------------------ generator
 class GeneratorDialog(QDialog):
+    """Random characters or a passphrase (random words). Options are remembered."""
+
     def __init__(self, qs: QSettings, use_button: bool = False, parent=None):
         super().__init__(parent)
         self.qs = qs
         self.setWindowTitle("Password generator")
-        self.resize(480, 0)
+        self.resize(500, 0)
         o = load_gen_options(qs)
         lay = QVBoxLayout(self)
+        self.mode = QComboBox()
+        self.mode.addItem("Random characters", "chars")
+        self.mode.addItem("Passphrase (random words)", "words")
+        self.mode.setCurrentIndex(max(0, self.mode.findData(str(qs.value("gen/mode", "chars")))))
+        lay.addWidget(self.mode)
         self.out = QLineEdit()
         self.out.setReadOnly(True)
         self.out.setStyleSheet(f"font-family:{theme.MONO}; font-size:17px; padding:8px;")
         lay.addWidget(self.out)
         self.bar = StrengthBar()
         lay.addWidget(self.bar)
+        # --- characters
+        self.char_box = QWidget()
+        cl = QVBoxLayout(self.char_box)
+        cl.setContentsMargins(0, 0, 0, 0)
         row = QHBoxLayout()
         row.addWidget(QLabel("Length"))
         self.slider = QSlider(Qt.Horizontal, minimum=8, maximum=128, value=o.length)
@@ -59,7 +70,7 @@ class GeneratorDialog(QDialog):
         self.spin.valueChanged.connect(self.slider.setValue)
         row.addWidget(self.slider, 1)
         row.addWidget(self.spin)
-        lay.addLayout(row)
+        cl.addLayout(row)
         self.chk = {}
         for k, label in (("lower", "Lowercase a–z"), ("upper", "Uppercase A–Z"), ("digits", "Digits 0–9"),
                          ("symbols", "Symbols !@#$…"), ("avoid_ambiguous", "Avoid look-alike characters (I l 1 O 0 o)")):
@@ -67,8 +78,40 @@ class GeneratorDialog(QDialog):
             c.setChecked(getattr(o, k))
             c.toggled.connect(self.regenerate)
             self.chk[k] = c
-            lay.addWidget(c)
+            cl.addWidget(c)
         self.spin.valueChanged.connect(self.regenerate)
+        lay.addWidget(self.char_box)
+        # --- passphrase
+        self.pass_box = QWidget()
+        pl = QFormLayout(self.pass_box)
+        pl.setContentsMargins(0, 0, 0, 0)
+        self.lang = QComboBox()
+        for key, (label, _f) in generator.WORDLISTS.items():
+            self.lang.addItem(f"{label} ({len(generator.load_wordlist(key))} words)", key)
+        self.lang.setCurrentIndex(max(0, self.lang.findData(str(qs.value("gen/lang", "eff")))))
+        self.words = QSpinBox(minimum=3, maximum=16, value=int(qs.value("gen/words", 6)))
+        self.sep = QComboBox()
+        for k, label in generator.SEPARATORS.items():
+            self.sep.addItem(label, k)
+        self.sep.setCurrentIndex(max(0, self.sep.findData(str(qs.value("gen/sep", "-")))))
+        self.cap = QCheckBox("Capitalize each word")
+        self.cap.setChecked(str(qs.value("gen/cap", False)).lower() in ("true", "1"))
+        self.num = QCheckBox("Add a digit to one word")
+        self.num.setChecked(str(qs.value("gen/number", False)).lower() in ("true", "1"))
+        pl.addRow("Word list", self.lang)
+        pl.addRow("Words", self.words)
+        pl.addRow("Separator", self.sep)
+        pl.addRow("", self.cap)
+        pl.addRow("", self.num)
+        for w in (self.lang, self.sep):
+            w.currentIndexChanged.connect(self.regenerate)
+        self.words.valueChanged.connect(self.regenerate)
+        self.cap.toggled.connect(self.regenerate)
+        self.num.toggled.connect(self.regenerate)
+        lay.addWidget(self.pass_box)
+        self.note = QLabel("", objectName="muted")
+        self.note.setWordWrap(True)
+        lay.addWidget(self.note)
         btns = QHBoxLayout()
         b_re = QPushButton("Regenerate")
         b_re.setIcon(icon("dice"))
@@ -88,21 +131,45 @@ class GeneratorDialog(QDialog):
             b_use.clicked.connect(self.accept)
             btns.addWidget(b_use)
         lay.addLayout(btns)
+        self.mode.currentIndexChanged.connect(self.regenerate)
         self.regenerate()
 
     def options(self) -> generator.GenOptions:
         return generator.GenOptions(length=self.spin.value(), **{k: c.isChecked() for k, c in self.chk.items()})
 
-    def regenerate(self) -> None:
+    def pass_options(self) -> generator.PassOptions:
+        return generator.PassOptions(words=self.words.value(), sep=self.sep.currentData(), capitalize=self.cap.isChecked(),
+                                     number=self.num.isChecked(), lang=self.lang.currentData())
+
+    def regenerate(self, *_a) -> None:
+        words = self.mode.currentData() == "words"
+        self.char_box.setVisible(not words)
+        self.pass_box.setVisible(words)
         try:
-            self.out.setText(generator.generate(self.options()))
+            if words:
+                po = self.pass_options()
+                self.out.setText(generator.generate_passphrase(po))
+                bits = generator.passphrase_entropy(po)
+                self.bar.set_bits(bits)
+                self.note.setText(f"Entropy {bits:.0f} bit: {po.words} words drawn uniformly from {len(generator.load_wordlist(po.lang))}. "
+                                  "Use at least 6 words for important accounts.")
+            else:
+                self.out.setText(generator.generate(self.options()))
+                self.bar.set_password(self.out.text())
+                self.note.setText("")
         except ValueError:
             self.out.setText("")
-        self.bar.set_password(self.out.text())
-        o = self.options()
-        self.qs.setValue("gen/length", o.length)
+            self.bar.set_password("")
+        q, o, po = self.qs, self.options(), self.pass_options()
+        q.setValue("gen/mode", self.mode.currentData())
+        q.setValue("gen/length", o.length)
         for k in self.chk:
-            self.qs.setValue(f"gen/{k}", getattr(o, k))
+            q.setValue(f"gen/{k}", getattr(o, k))
+        q.setValue("gen/words", po.words)
+        q.setValue("gen/sep", po.sep)
+        q.setValue("gen/cap", po.capitalize)
+        q.setValue("gen/number", po.number)
+        q.setValue("gen/lang", po.lang)
 
     def password(self) -> str:
         return self.out.text()

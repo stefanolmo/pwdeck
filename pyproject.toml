@@ -22,7 +22,7 @@ pwdeck-recover = "pwdeck.recover:main"
 packages = ["pwdeck"]
 
 [tool.setuptools.package-data]
-pwdeck = ["pwdeck.svg"]
+pwdeck = ["pwdeck.svg", "wordlists/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

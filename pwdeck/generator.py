@@ -1,7 +1,9 @@
 """Password generator (CSPRNG) and a heuristic strength estimator."""
 from __future__ import annotations
 
+import functools
 import math
+import os
 import re
 import secrets
 import string
@@ -88,3 +90,49 @@ def estimate(password: str) -> tuple[float, int]:
 
 
 LABELS = ["Very weak", "Weak", "Fair", "Good", "Strong"]
+
+
+# ---------------------------------------------------------------------------------------------- passphrases
+WORDLISTS = {"eff": ("English — EFF large list", "eff_large.txt"), "it": ("Italiano — lista da Wikipedia", "italian.txt")}
+SEPARATORS = {"-": "hyphen  -", " ": "space", ".": "dot  .", "_": "underscore  _", ",": "comma  ,", "": "none"}
+
+
+@functools.lru_cache(maxsize=None)
+def load_wordlist(lang: str) -> tuple[str, ...]:
+    path = os.path.join(os.path.dirname(__file__), "wordlists", WORDLISTS[lang][1])
+    with open(path, encoding="utf-8") as f:
+        return tuple(w for w in (line.strip() for line in f) if w)
+
+
+@dataclass
+class PassOptions:
+    words: int = 6
+    sep: str = "-"
+    capitalize: bool = False
+    number: bool = False            # append one random digit to one random word
+    lang: str = "eff"
+
+
+def passphrase_entropy(o: PassOptions) -> float:
+    """Exact entropy (bits) of the generator's output for these options: uniform words (+ position and digit if `number`)."""
+    bits = o.words * math.log2(len(load_wordlist(o.lang)))
+    if o.number:
+        bits += math.log2(o.words * 10)
+    return bits
+
+
+def generate_passphrase(o: PassOptions | None = None) -> str:
+    o = o or PassOptions()
+    if not 3 <= o.words <= 16:
+        raise ValueError("words must be between 3 and 16")
+    wl = load_wordlist(o.lang)
+    ws = [secrets.choice(wl) for _ in range(o.words)]
+    if o.capitalize:
+        ws = [w[:1].upper() + w[1:] for w in ws]
+    if o.number:
+        ws[secrets.randbelow(o.words)] += str(secrets.randbelow(10))
+    return o.sep.join(ws)
+
+
+def score_from_bits(bits: float) -> int:
+    return 0 if bits < 28 else 1 if bits < 45 else 2 if bits < 65 else 3 if bits < 90 else 4

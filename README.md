@@ -37,7 +37,7 @@ Every item can also have: **custom fields** (optionally hidden), **folders** (ne
 |---|---|
 | Vault | single file, AES-256-GCM, **Argon2id** key derivation (older vaults: scrypt, upgradeable in Settings → Key derivation), atomic writes (temp file + fsync + rename), a write after every change |
 | Unlock | master password **+ optional keyfile** (second factor) **+ recovery key** (printed once at creation) |
-| Generator | CSPRNG, length 8–128, character classes, no look-alikes, guaranteed one char per class, strength meter |
+| Generator | CSPRNG. **Characters**: length 8–128, classes, no look-alikes, one char per class guaranteed. **Passphrase**: 3–16 random words (EFF large list, 7776 words, or an Italian list, 4222 words), separator, capitalisation, optional digit; the entropy shown is exact (words × log2 list size), not estimated |
 | Clipboard | auto-clear after N seconds (only if it still holds *your* value), asks clipboard managers (KDE/Klipper) not to record it |
 | Auto-lock | after N idle minutes, optionally on minimize, and **when the screen locks or the PC suspends** (systemd-logind with a delay inhibitor, KDE/GNOME lock screen, over D-Bus; on by default); the key is dropped from the app on lock |
 | Process hardening | no core dumps (`RLIMIT_CORE=0`); `prctl(PR_SET_DUMPABLE, 0)` blocks ptrace and `/proc/PID/mem` for other processes of the same user, applied only where the kernel's Yama `ptrace_scope` is 0 (it is already 1 on Ubuntu/Fedora, which gives the same protection). `PWDECK_HARDEN=auto\|always\|never` |
@@ -111,6 +111,12 @@ header: KDF (Argon2id or scrypt) params + salt, key slots {password, recovery} =
 * If the vault is in a synced folder (Dropbox, Nextcloud…) do not edit it from two computers at the same time: the app will warn before overwriting
   a file that changed, but it does not merge.
 
+## Word lists
+
+`pwdeck/wordlists/` holds the EFF long list (CC BY 3.0) and an Italian list derived from Wikipedia frequencies (CC BY-SA 3.0, filtered to lowercase ASCII words of 5–9 letters, so no accents).
+The Italian list is a frequency list: it contains some proper nouns and foreign words, which does not lower the entropy (that depends only on the list size) but makes phrases less
+pleasant to read than the EFF list, which was hand-curated for passphrases. Details and licences: `pwdeck/wordlists/NOTICE.txt`.
+
 ## Import notes
 
 CSV columns are matched by name (case-insensitive): `name/title`, `url/uri/login_uri`, `username/login/login_username`, `password/login_password`,
@@ -131,5 +137,5 @@ and its compatibility with the main code is covered by a test.
 
 ## Ideas not implemented yet
 
-Browser auto-fill extension (needs a local native-messaging bridge) · passphrase generator (needs a vetted word list) · KDBX import/export ·
+Browser auto-fill extension (needs a local native-messaging bridge) · KDBX import/export ·
 multiple vaults at once · QR scan for TOTP · hardware keys (FIDO2 hmac-secret / YubiKey) as a second factor · merge of divergent vault copies.

@@ -489,3 +489,47 @@ def test_recover_tool_extracts_attachments(vault, vpath, tmp_path):
                         f"import runpy; runpy.run_path({tool!r}, run_name='__main__')"], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "att" / "Tax_2024" / "return.pdf").read_bytes() == b"PDFDATA"
+
+
+# ------------------------------------------------------------------ passphrases
+def test_wordlists_are_clean_and_sized():
+    from pwdeck.generator import WORDLISTS, load_wordlist
+    eff = load_wordlist("eff")
+    assert len(eff) == 7776 == len(set(eff)) and all(3 <= len(w) <= 9 for w in eff)
+    ita = load_wordlist("it")
+    assert len(ita) == len(set(ita)) >= 4000
+    assert all(w.isascii() and w.isalpha() and w.islower() and 5 <= len(w) <= 9 for w in ita)
+    assert set(WORDLISTS) == {"eff", "it"}
+
+
+def test_passphrase_structure_and_entropy():
+    import math
+    from pwdeck.generator import PassOptions, generate_passphrase, load_wordlist, passphrase_entropy
+    o = PassOptions(words=6, sep="-")
+    p = generate_passphrase(o)
+    parts = p.split("-")
+    wl = set(load_wordlist("eff"))
+    assert len(parts) >= 6 and all(w in wl or "-" in w for w in parts)       # EFF has 4 hyphenated words
+    assert generate_passphrase(o) != generate_passphrase(o)
+    assert abs(passphrase_entropy(o) - 6 * math.log2(7776)) < 1e-9
+    o2 = PassOptions(words=5, sep=" ", capitalize=True, number=True, lang="it")
+    ph = generate_passphrase(o2)
+    ws = ph.split(" ")
+    assert len(ws) == 5 and all(w[0].isupper() for w in ws) and sum(c.isdigit() for c in ph) == 1
+    assert abs(passphrase_entropy(o2) - (5 * math.log2(len(load_wordlist("it"))) + math.log2(50))) < 1e-9
+    nosep = generate_passphrase(PassOptions(words=3, sep="", lang="it"))
+    assert nosep.isalpha() and nosep.islower()                                   # no separator, no digit: plain concatenation
+    with pytest.raises(ValueError):
+        generate_passphrase(PassOptions(words=2))
+
+
+def test_passphrase_is_uniform_enough():
+    from collections import Counter
+    from pwdeck.generator import PassOptions, generate_passphrase, load_wordlist
+    wl = load_wordlist("it")
+    c = Counter()
+    for _ in range(3000):
+        c.update(generate_passphrase(PassOptions(words=8, sep=" ", lang="it")).split(" "))
+    # 24000 uniform draws over ~4200 words: expected coverage 99.7 %, expected count ~5.7 per word (max of a Poisson(5.7) sample stays < 20)
+    assert set(c) <= set(wl) and len(c) > 0.97 * len(wl)
+    assert max(c.values()) < 20

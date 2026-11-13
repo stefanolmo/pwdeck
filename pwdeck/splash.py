@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import math
 
-import numpy as np
 from PySide6.QtCore import QElapsedTimer, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QRadialGradient
 from PySide6.QtWidgets import QApplication, QWidget
@@ -47,16 +46,25 @@ class SplashScreen(QWidget):
         self._tick.timeout.connect(self._advance)
         yaw, pitch = math.radians(-35), math.radians(55)
         cz, sz, cx, sx = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)
-        self._rot = np.array([[1, 0, 0], [0, cx, sx], [0, -sx, cx]]) @ np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
+        rx = ((1, 0, 0), (0, cx, sx), (0, -sx, cx))
+        rz = ((cz, -sz, 0), (sz, cz, 0), (0, 0, 1))
+        self._rot = tuple(tuple(sum(rx[i][k] * rz[k][j] for k in range(3)) for j in range(3)) for i in range(3))   # rx @ rz
 
-    def _proj(self, pts: np.ndarray, origin) -> np.ndarray:
-        q = np.atleast_2d(pts) @ self._rot.T
-        return np.column_stack([origin[0] + q[:, 0], origin[1] - q[:, 1]])
+    def _proj(self, pts, origin) -> list[tuple[float, float]]:
+        """Isometric-ish projection of (x, y, z) points to screen coordinates."""
+        r = self._rot
+        return [(origin[0] + r[0][0] * x + r[0][1] * y + r[0][2] * z, origin[1] - (r[1][0] * x + r[1][1] * y + r[1][2] * z))
+                for x, y, z in pts]
 
-    def _squircle(self, size: float, z: float, n: int = 160) -> np.ndarray:
-        t = np.linspace(0, 2 * math.pi, n, endpoint=False)
-        c, s, e = np.cos(t), np.sin(t), 2.0 / 4.0
-        return np.column_stack([size * np.sign(c) * np.abs(c) ** e, size * np.sign(s) * np.abs(s) ** e, np.full_like(t, z)])
+    @staticmethod
+    def _squircle(size: float, z: float, n: int = 160) -> list[tuple[float, float, float]]:
+        e = 2.0 / 4.0
+        out = []
+        for i in range(n):
+            t = 2 * math.pi * i / n
+            c, s = math.cos(t), math.sin(t)
+            out.append((size * math.copysign(abs(c) ** e, c), size * math.copysign(abs(s) ** e, s), z))
+        return out
 
     def start(self) -> None:
         scr = QApplication.primaryScreen()
@@ -113,8 +121,8 @@ class SplashScreen(QWidget):
         p.setPen(QPen(QColor(255, 255, 255, 16), 1))
         span, step = 220, 22
         for v in range(-span, span + 1, step):
-            a = self._proj(np.array([[v, -span, -45.0], [v, span, -45.0]]), origin)
-            b = self._proj(np.array([[-span, v, -45.0], [span, v, -45.0]]), origin)
+            a = self._proj([(v, -span, -45.0), (v, span, -45.0)], origin)
+            b = self._proj([(-span, v, -45.0), (span, v, -45.0)], origin)
             p.drawLine(QPointF(*a[0]), QPointF(*a[1]))
             p.drawLine(QPointF(*b[0]), QPointF(*b[1]))
         fade = QLinearGradient(0, 0, W * 0.55, 0)
@@ -142,7 +150,7 @@ class SplashScreen(QWidget):
         if prog < 0.55:
             return
         a = _ease((prog - 0.55) / 0.35)
-        c = self._proj(np.array([[0, 0, top_z + 4.0]]), origin)[0]
+        c = self._proj([(0.0, 0.0, top_z + 4.0)], origin)[0]
         halo = QRadialGradient(QPointF(*c), 60)
         halo.setColorAt(0, QColor(45, 212, 191, int(110 * a)))
         halo.setColorAt(1, QColor(45, 212, 191, 0))

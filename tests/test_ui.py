@@ -221,3 +221,14 @@ def test_splash_renders(app):
         s.set_time(t)
         s.grab()
     s.close()
+
+
+def test_imports_need_only_declared_dependencies():
+    """Regression: splash.py once imported numpy, which is not a dependency. Block every undeclared third-party package."""
+    import subprocess
+    import sys
+    code = ("import sys\n"
+            "for m in ('numpy', 'scipy', 'pyclipper', 'serial', 'svgelements', 'PIL'): sys.modules[m] = None\n"
+            "import pwdeck.__main__, pwdeck.recover, pwdeck.backup, pwdeck.audit\n")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env={**__import__('os').environ, "QT_QPA_PLATFORM": "offscreen"})
+    assert r.returncode == 0, r.stderr

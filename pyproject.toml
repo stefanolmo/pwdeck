@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pwdeck"
-version = "0.1.1"
+version = "0.1.2"
 description = "Local password manager with an encrypted single-file SQLite vault (Passbolt-like item types, no server)"
 readme = "README.md"
 requires-python = ">=3.11"

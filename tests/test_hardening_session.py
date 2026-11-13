@@ -19,20 +19,36 @@ def _run(code, env=None):
     return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=e, cwd=os.path.dirname(os.path.dirname(__file__)))
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only")
-def test_harden_disables_dumps_and_core():
+def _harden_state(env):
     r = _run("import resource; from pwdeck import hardening as h\n"
-             "assert h.is_dumpable() is True\n"
              "rep = h.harden()\n"
-             "print(rep['dumpable_disabled'], rep['core_disabled'], h.is_dumpable(), resource.getrlimit(resource.RLIMIT_CORE))")
+             "print(rep['dumpable_disabled'], rep['core_disabled'], h.is_dumpable(), resource.getrlimit(resource.RLIMIT_CORE)[0], rep['note'])", env)
     assert r.returncode == 0, r.stderr
-    assert r.stdout.split()[:3] == ["True", "True", "False"] and r.stdout.strip().endswith("(0, 0)")
+    return r.stdout.strip()
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only")
-def test_harden_opt_out_and_inherited_by_nothing_else():
-    r = _run("from pwdeck import hardening as h; rep = h.harden(); print(rep['skipped'], h.is_dumpable())", {"PWDECK_ALLOW_DUMP": "1"})
-    assert r.stdout.split() == ["PWDECK_ALLOW_DUMP", "is", "set", "True"]
+def test_harden_always_disables_dumps_and_core():
+    out = _harden_state({"PWDECK_HARDEN": "always"})
+    assert out.startswith("True True False 0")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only")
+def test_harden_auto_skips_dumpable_when_yama_already_protects(tmp_path):
+    f = tmp_path / "scope"
+    f.write_text("1\n")
+    out = _harden_state({"PWDECK_YAMA_FILE": str(f)})          # auto mode, Yama scope 1 (Ubuntu default)
+    assert out.startswith("False True True 0") and "Yama ptrace_scope=1" in out     # still dumpable: desktop integration intact, no core dumps
+    f.write_text("0\n")
+    assert _harden_state({"PWDECK_YAMA_FILE": str(f)}).startswith("True True False 0")   # scope 0: nothing else protects us
+    assert _harden_state({"PWDECK_YAMA_FILE": str(tmp_path / "missing")}).startswith("True True False 0")  # unknown: protect
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux only")
+def test_harden_never_and_legacy_opt_out():
+    assert _harden_state({"PWDECK_HARDEN": "never"}).startswith("False True True 0")
+    out = _harden_state({"PWDECK_ALLOW_DUMP": "1"})
+    assert out.startswith("False False True") and "disabled" in out
 
 
 @pytest.fixture

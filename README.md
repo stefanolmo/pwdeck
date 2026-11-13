@@ -40,7 +40,7 @@ a 25-entry **history** of previous secrets, and goes to the **trash** before bei
 | Generator | CSPRNG, length 8–128, character classes, no look-alikes, guaranteed one char per class, strength meter |
 | Clipboard | auto-clear after N seconds (only if it still holds *your* value), asks clipboard managers (KDE/Klipper) not to record it |
 | Auto-lock | after N idle minutes, optionally on minimize, and **when the screen locks or the PC suspends** (systemd-logind with a delay inhibitor, KDE/GNOME lock screen, over D-Bus; on by default); the key is dropped from the app on lock |
-| Process hardening | at startup `prctl(PR_SET_DUMPABLE, 0)` + `RLIMIT_CORE=0`: no core dumps, and other processes of the same user cannot read the app's memory via ptrace / `/proc/PID/mem` (opt out for debugging: `PWDECK_ALLOW_DUMP=1`) |
+| Process hardening | no core dumps (`RLIMIT_CORE=0`); `prctl(PR_SET_DUMPABLE, 0)` blocks ptrace and `/proc/PID/mem` for other processes of the same user, applied only where the kernel's Yama `ptrace_scope` is 0 (it is already 1 on Ubuntu/Fedora, which gives the same protection). `PWDECK_HARDEN=auto\|always\|never` |
 | Search | all words must match across name, username, URL, tags, folder (descriptions and notes are sealed and therefore **not** searched) |
 | Audit | weak, reused, old, expired passwords; optional online breach check (Have I Been Pwned *k-anonymity*: only 5 hash chars leave the PC, on explicit click) |
 | Backup | verified copy, rotating **automatic backups** (keep last N), and an **Emergency kit** zip (vault + standalone recovery script + instructions) |
@@ -98,6 +98,8 @@ header: scrypt params + salt, key slots {password, recovery} = AES-GCM-wrapped D
   Exceptions: the TOTP secret of the *selected* item is decrypted to show the live code; whatever you revealed, copied or edited can stay in memory
   after you hide it or lock (Python and Qt do not zero freed memory; one hidden-field value was still found after hiding in the test); the Audit and Export
   decrypt everything while they run.
+* **Hardening and the title bar**: `PR_SET_DUMPABLE=0` makes `/proc/PID` root-owned, which on GNOME/Wayland can leave the window's title bar without its minimize/maximize/close buttons
+  (Qt asks the desktop portal for the button layout and the portal cannot inspect the process). That is why `auto` skips it when Yama already protects you; if you ever see a title bar without buttons run `PWDECK_HARDEN=never pwdeck`.
 * **Hardening limits**: `PR_SET_DUMPABLE=0` does not stop root, a kernel exploit, or malware that injects code through your launcher/environment, and the sleep lock
   relies on the desktop/logind emitting the signals. Suspend is covered by a logind *delay inhibitor*: the app holds it, locks the vault when `PrepareForSleep` arrives and only then lets suspend proceed
   (logind waits at most `InhibitDelayMaxSec`, 5 s by default). Tested against a fake logind, not a real suspend.

@@ -20,9 +20,7 @@ def main(argv=None) -> int:
     ap.add_argument("--version", action="version", version=f"pwdeck {__version__}")
     args = ap.parse_args(argv)
     rep = harden()                      # before Qt and before any secret exists in memory
-    if rep["skipped"]:
-        print(f"pwdeck: process hardening skipped ({rep['skipped']})", file=sys.stderr)
-    elif not rep["dumpable_disabled"] and sys.platform.startswith("linux"):
+    if rep["failed"]:
         print("pwdeck: warning: could not disable memory dumps (PR_SET_DUMPABLE)", file=sys.stderr)
 
     app = QApplication(sys.argv[:1])

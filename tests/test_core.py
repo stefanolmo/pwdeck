@@ -22,7 +22,7 @@ def test_roundtrip_and_no_plaintext_on_disk(vpath):
     for marker in (b"SQLite format", b"Bank", b"mario.rossi", b"S3cr3t-Marker-XYZ", b"bank.example"):
         assert marker not in raw
     v = Vault.open(vpath, "pw")
-    it = v.items()[0]
+    it = v.items(secrets=True)[0]
     assert (it.name, it.password, it.uris) == ("Bank", "S3cr3t-Marker-XYZ", ["https://bank.example"])
     v.close()
 
@@ -216,7 +216,7 @@ def test_csv_import_keepass_like(vault):
     text = '"Group","Title","Username","Password","URL","Notes"\n"Work/Mail","Gmail","me","pw1","https://g.com","n"\n"","NoUser","","","",""\n'
     items = importers.parse_csv(text)
     assert importers.import_items(vault, items) == (2, 0)
-    g = next(i for i in vault.items() if i.name == "Gmail")
+    g = next(i for i in vault.items(secrets=True) if i.name == "Gmail")
     assert vault.folder_path(g.folder_id) == "Work/Mail" and g.uris == ["https://g.com"] and g.description == "n"
     assert importers.import_items(vault, importers.parse_csv(text)) == (0, 2)       # duplicates skipped
 
@@ -240,7 +240,7 @@ def test_bitwarden_json_and_roundtrip(vault, tmp_path):
     p.write_text(json.dumps(bw))
     items = importers.detect_and_parse(str(p))
     assert importers.import_items(vault, items) == (3, 0)
-    card = next(i for i in vault.items() if i.type == "card")
+    card = next(i for i in vault.items(secrets=True) if i.type == "card")
     assert card.extra["number"] == "4111" and card.extra["expiry"] == "1/2030"
     # PW Deck JSON round trip into a second vault
     p2 = tmp_path / "x.json"
@@ -248,7 +248,7 @@ def test_bitwarden_json_and_roundtrip(vault, tmp_path):
     assert oct(os.stat(p2).st_mode & 0o777) == "0o600"
     v2, _ = Vault.create(str(tmp_path / "v2.pwdeck"), "x", kdf="fast")
     assert importers.import_items(v2, importers.detect_and_parse(str(p2))) == (3, 0)
-    n = next(i for i in v2.items() if i.name == "Netflix")
+    n = next(i for i in v2.items(secrets=True) if i.name == "Netflix")
     assert n.fields == [{"label": "pin", "value": "1", "hidden": True}] and v2.folder_path(n.folder_id) == "Fam"
     v2.close()
     assert "Netflix" in importers.export_csv(vault)
@@ -262,3 +262,104 @@ def test_failed_close_keeps_vault_usable(vault, vpath, monkeypatch):
     assert len(vault.items()) == 1          # database still open, nothing lost
     monkeypatch.undo()
     vault.close()
+
+
+# ------------------------------------------------------------------ field sealing (format v2)
+def _marker_vault(vault):
+    return vault.add_item(Item(name="Bank", username="mario", password="PWD-marker-111", totp="JBSWY3DPEHPK3PXP",
+                               description="DESC-marker-222", uris=["https://bank.example"],
+                               extra={"cvv": "CVV-marker-333", "holder": "HOLD-marker-444"},
+                               fields=[{"label": "pin", "value": "FLD-marker-555", "hidden": True}]))
+
+
+def test_memory_image_has_no_plaintext_secrets(vault):
+    _marker_vault(vault)
+    image = bytes(vault.db.serialize())                    # exactly what sits in RAM while the vault is unlocked
+    for secret in (b"PWD-marker-111", b"JBSWY3DPEHPK3PXP", b"DESC-marker-222", b"CVV-marker-333", b"HOLD-marker-444", b"FLD-marker-555"):
+        assert secret not in image
+    assert b"Bank" in image and b"mario" in image and b"bank.example" in image and b"pin" in image   # searchable metadata stays plain
+
+
+def test_light_items_and_reveal(vault):
+    iid = _marker_vault(vault)
+    (it,) = vault.items()
+    assert it.password == "" and it.totp == "" and it.description == "" and it.extra == {}
+    assert it.has == {"password", "totp", "description", "cvv", "holder", "field:0"}
+    assert it.fields == [{"label": "pin", "value": "", "hidden": True}]
+    assert vault.reveal(iid, "password") == "PWD-marker-111" and vault.reveal(iid, "totp") == "JBSWY3DPEHPK3PXP"
+    assert vault.reveal(iid, "description") == "DESC-marker-222" and vault.reveal(iid, "cvv") == "CVV-marker-333"
+    assert vault.reveal(iid, "field:0") == "FLD-marker-555" and vault.reveal(iid, "pin") == ""
+    full = vault.get_item(iid)
+    assert full.password == "PWD-marker-111" and full.extra["holder"] == "HOLD-marker-444" and full.fields[0]["value"] == "FLD-marker-555"
+    assert vault.has_duplicate(Item(name="Bank", username="mario", password="PWD-marker-111", uris=["https://bank.example"]))
+    assert not vault.has_duplicate(Item(name="Bank", username="mario", password="other", uris=["https://bank.example"]))
+
+
+def test_sealed_values_are_bound_to_their_row_and_column(vault):
+    a = vault.add_item(Item(name="a", password="pw-a", description="d-a"))
+    b = vault.add_item(Item(name="b", password="pw-b"))
+    pa = vault.db.execute("SELECT password FROM items WHERE id=?", (a,)).fetchone()[0]
+    vault.db.execute("UPDATE items SET password=? WHERE id=?", (pa, b))               # paste a's ciphertext into b
+    with pytest.raises(CorruptVaultError):
+        vault.reveal(b, "password")
+    vault.db.execute("UPDATE items SET description=? WHERE id=?", (pa, a))            # same row, wrong column
+    with pytest.raises(CorruptVaultError):
+        vault.reveal(a, "description")
+
+
+def test_verify_file_detects_a_damaged_sealed_field(vault, tmp_path):
+    iid = vault.add_item(Item(name="a", password="pw-a"))
+    assert vault.verify_file(vault.copy_to(str(tmp_path))) == 1
+    blob = bytearray(vault.db.execute("SELECT password FROM items WHERE id=?", (iid,)).fetchone()[0])
+    blob[-1] ^= 1
+    vault.db.execute("UPDATE items SET password=? WHERE id=?", (bytes(blob), iid))
+    with pytest.raises(CorruptVaultError):
+        vault.copy_to(str(tmp_path / "bad.pwdeck"))
+
+
+def _make_v1_vault(path, password):
+    """A vault exactly as format v1 stored it (plain secret columns), built with the public crypto API."""
+    import json
+    from pwdeck import vault as vmod
+    dek, header, rk = crypto.create_keys(password, None, "fast")
+    db = sqlite3.connect(":memory:")
+    db.executescript(vmod.SCHEMA)
+    for k, v in (("schema", "1"), ("vault_id", "vid-1"), ("created", "0")):
+        db.execute("INSERT INTO meta VALUES(?,?)", (k, v))
+    db.execute("INSERT INTO items(id,type,name,username,password,uris,description,totp,fields,extra,favorite,created,modified,pw_changed)"
+               " VALUES('i1','password','Old','me','V1-pass-marker','[\"https://x\"]','V1-desc','JBSWY3DPEHPK3PXP',?,?,1,1,1,1)",
+               (json.dumps([{"label": "l", "value": "V1-field", "hidden": True}]), json.dumps({"cvv": "V1-cvv"})))
+    db.execute("INSERT INTO history(item_id,ts,snapshot) VALUES('i1',1,?)", (json.dumps({"password": "V1-old-pass"}),))
+    db.commit()
+    crypto.atomic_write(path, crypto.encode(header, dek, db.serialize()))
+    return rk
+
+
+def test_v1_vault_is_migrated_and_backed_up(vpath):
+    rk = _make_v1_vault(vpath, "pw")
+    original = open(vpath, "rb").read()
+    v = Vault.open(vpath, "pw")
+    assert open(vpath + ".pre-v2.bak", "rb").read() == original             # untouched copy of the old file
+    it = v.get_item("i1")
+    assert (it.password, it.description, it.totp, it.extra, it.fields[0]["value"], it.favorite) == \
+        ("V1-pass-marker", "V1-desc", "JBSWY3DPEHPK3PXP", {"cvv": "V1-cvv"}, "V1-field", True)
+    assert v.history("i1")[0]["data"] == {"password": "V1-old-pass"}
+    image = bytes(v.db.serialize())
+    assert b"V1-pass-marker" not in image and b"V1-cvv" not in image and b"V1-old-pass" not in image   # VACUUM left no remnants
+    v.close()
+    v = Vault.open(vpath, recovery_key=rk)                                 # already v2 on disk: no second migration
+    assert v.reveal("i1", "password") == "V1-pass-marker"
+    v.close()
+
+
+def test_recover_tool_unseals_v2(vault, vpath, tmp_path):
+    _marker_vault(vault)
+    tool = os.path.join(os.path.dirname(__file__), "..", "pwdeck", "recover.py")
+    out = str(tmp_path / "o.sqlite")
+    r = subprocess.run([sys.executable, "-c",
+                        f"import getpass,sys; getpass.getpass=lambda p='': 'correct horse'; sys.argv=['x','decrypt',{vpath!r},'-o',{out!r}];"
+                        f"import runpy; runpy.run_path({tool!r}, run_name='__main__')"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    row = sqlite3.connect(out).execute("SELECT password,description,totp,extra,fields FROM items").fetchone()
+    assert row[:3] == ("PWD-marker-111", "DESC-marker-222", "JBSWY3DPEHPK3PXP")
+    assert "CVV-marker-333" in row[3] and "FLD-marker-555" in row[4]

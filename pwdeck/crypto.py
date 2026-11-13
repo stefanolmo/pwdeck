@@ -195,6 +195,32 @@ def decrypt_payload(header: dict, ciphertext: bytes, dek: bytes) -> bytes:
         raise CorruptVaultError("the vault content is damaged or has been modified") from e
 
 
+# ---------------------------------------------------------------------------------------------- field sealing
+# Inside the SQLite image every secret value is ALSO encrypted on its own (AES-256-GCM, key = HKDF(DEK)), so the database
+# that lives in memory while the vault is unlocked contains no plaintext secrets: a value is decrypted only when the user
+# reveals / copies / edits it. The AAD binds each ciphertext to vault, item, column and sub-key (no swapping between rows).
+FIELD_INFO = b"pwdeck-field-key-v1"
+_SEALED_V1 = b"\x01"
+
+
+def derive_field_key(dek: bytes) -> bytes:
+    return HKDF(hashes.SHA256(), 32, salt=None, info=FIELD_INFO).derive(dek)
+
+
+def seal(key: bytes, aad: bytes, plaintext: bytes) -> bytes:
+    nonce = secrets.token_bytes(12)
+    return _SEALED_V1 + nonce + AESGCM(key).encrypt(nonce, plaintext, aad)
+
+
+def unseal(key: bytes, aad: bytes, blob: bytes) -> bytes:
+    if len(blob) < 1 + 12 + 16 or blob[:1] != _SEALED_V1:
+        raise CorruptVaultError("malformed sealed field")
+    try:
+        return AESGCM(key).decrypt(blob[1:13], blob[13:], aad)
+    except InvalidTag as e:
+        raise CorruptVaultError("a field of the vault is damaged or was tampered with") from e
+
+
 def atomic_write(path: str, data: bytes) -> None:
     """Write to a temp file in the same directory, fsync, then rename over the target."""
     d = os.path.dirname(os.path.abspath(path))

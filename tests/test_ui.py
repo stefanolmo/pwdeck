@@ -69,7 +69,7 @@ def test_sidebar_filters_and_search(win):
 def test_copy_clears_only_own_value(win, app):
     win.qs.setValue("clipboard_s", 1)
     win.list.setCurrentItem(win.list.topLevelItem(0))
-    it = win.current_item()
+    it = win.current_item(full=True)
     win.copy_field("password")
     assert QApplication.clipboard().text() == it.password
     t0 = time.time()
@@ -149,24 +149,29 @@ def test_item_actions_and_trash(win):
     assert win.list.topLevelItemCount() == 3
 
 
-def test_detail_panel_shows_totp_and_masks_password(win):
+def test_detail_panel_decrypts_only_on_demand(win):
     win.search.setText("GitHub")
     win.list.setCurrentItem(win.list.topLevelItem(0))
     p = win.detail
     assert len(p.totp_widgets) == 1 and p.totp_widgets[0].current().isdigit()
-    from pwdeck.detail import FieldRow
+    from pwdeck.detail import MASK, FieldRow
+    calls = []
+    orig = win.vault.reveal
+    win.vault.reveal = lambda iid, key: (calls.append(key), orig(iid, key))[1]
     rows = p.scroll.widget().findChildren(FieldRow)
-    pw = next(r for r in rows if r.secret and "Zq9" in r.value)
-    assert "Zq9" not in pw.lbl.text()
+    pw = next(r for r in rows if r.secret and r.lbl.text() == MASK)
+    assert pw.lbl.text() == MASK and "password" not in calls         # masked, and the password was not decrypted
     pw.eye.setChecked(True)
-    assert "Zq9" in pw.lbl.text()
+    assert pw.lbl.text() == "Zq9!vL2#xP7@rT4k" and calls == ["password"]
+    pw.eye.setChecked(False)
+    assert pw.lbl.text() == MASK
 
 
 def test_audit_dialog(win, qs):
     win.vault.add_item(Item(name="r1", password="same-pw-123"))
     win.vault.add_item(Item(name="r2", password="same-pw-123"))
     win.vault.add_item(Item(name="weak", password="1234"))
-    d = AuditDialog(win.vault.items(), qs)
+    d = AuditDialog(win.vault.items(secrets=True), qs)
     assert {i.name for i, _ in d.report["reused"]} == {"r1", "r2"}
     assert "weak" in {i.name for i, _ in d.report["weak"]}
     assert d.tabs.tabText(1) == "Reused (2)"

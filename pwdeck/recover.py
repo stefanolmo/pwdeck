@@ -60,6 +60,41 @@ def unlock(header, password, keyfile, recovery):
         sys.exit("wrong password / keyfile / recovery key")
 
 
+def unsealed_db(plain, dek):
+    """Returns an in-memory SQLite whose secret columns are plain text (format v2 stores them sealed inside the database)."""
+    db = sqlite3.connect(":memory:")
+    db.deserialize(bytearray(plain))
+    db.row_factory = sqlite3.Row
+    if int(db.execute("SELECT value FROM meta WHERE key='schema'").fetchone()[0]) < 2:
+        return db
+    fk = HKDF(hashes.SHA256(), 32, salt=None, info=b"pwdeck-field-key-v1").derive(dek)
+    vid = db.execute("SELECT value FROM meta WHERE key='vault_id'").fetchone()[0]
+
+    def op(iid, col, blob, sub=""):
+        if not blob:
+            return ""
+        blob = bytes(blob)
+        return AESGCM(fk).decrypt(blob[1:13], blob[13:], f"{vid}|{iid}|{col}|{sub}".encode()).decode()
+
+    b64 = base64.b64decode
+    for r in db.execute("SELECT id,password,description,totp,fields,extra FROM items").fetchall():
+        i = r["id"]
+        extra = {k: op(i, "extra", b64(v), k) for k, v in json.loads(r["extra"]).items() if v}
+        fields = [{"label": f["label"], "hidden": f["hidden"], "value": op(i, "fields", b64(f["value"]), f"field:{n}") if f["value"] else ""}
+                  for n, f in enumerate(json.loads(r["fields"]))]
+        db.execute("UPDATE items SET password=?,description=?,totp=?,fields=?,extra=? WHERE id=?",
+                   (op(i, "password", r["password"]), op(i, "description", r["description"]), op(i, "totp", r["totp"]),
+                    json.dumps(fields), json.dumps(extra), i))
+    for h in db.execute("SELECT id,item_id,snapshot FROM history").fetchall():
+        blob = b64(h["snapshot"])
+        db.execute("UPDATE history SET snapshot=? WHERE id=?",
+                   (AESGCM(fk).decrypt(blob[1:13], blob[13:], f"{vid}|{h['item_id']}|history|".encode()).decode(), h["id"]))
+    db.execute("UPDATE meta SET value='1' WHERE key='schema'")      # now it is a plain (v1 layout) database
+    db.commit()
+    db.execute("VACUUM")
+    return db
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["info", "decrypt", "csv"])
@@ -85,14 +120,13 @@ def main():
         plain = AESGCM(dek).decrypt(base64.b64decode(header["nonce"]), ct, MAGIC)
     except InvalidTag:
         sys.exit("the vault content is damaged (authentication failed)")
+    db = unsealed_db(plain, dek)
     if a.command == "decrypt":
         fd = os.open(a.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as f:
-            f.write(plain)
+            f.write(db.serialize())
         print(f"written {a.output} (plain SQLite)")
     else:
-        db = sqlite3.connect(":memory:")
-        db.deserialize(plain)
         fold = {r[0]: (r[1], r[2]) for r in db.execute("SELECT id,parent_id,name FROM folders")}
 
         def path(fid):
@@ -106,7 +140,7 @@ def main():
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             w = csv.writer(f)
             w.writerow(["folder", "type", "name", "url", "username", "password", "totp", "description", "extra", "fields"])
-            for r in db.execute("SELECT folder_id,type,name,uris,username,password,totp,description,extra,fields FROM items WHERE deleted IS NULL"):
+            for r in db.execute("SELECT folder_id,type,name,uris,username,password,totp,description,extra,fields FROM items WHERE deleted IS NULL").fetchall():
                 uris = json.loads(r[3])
                 w.writerow([path(r[0]), r[1], r[2], uris[0] if uris else "", r[4], r[5], r[6], r[7], r[8], r[9]])
         print(f"written {a.output} (plain text CSV)")

@@ -41,7 +41,7 @@ a 25-entry **history** of previous secrets, and goes to the **trash** before bei
 | Clipboard | auto-clear after N seconds (only if it still holds *your* value), asks clipboard managers (KDE/Klipper) not to record it |
 | Auto-lock | after N idle minutes, optionally on minimize, and **when the screen locks or the PC suspends** (systemd-logind with a delay inhibitor, KDE/GNOME lock screen, over D-Bus; on by default); the key is dropped from the app on lock |
 | Process hardening | at startup `prctl(PR_SET_DUMPABLE, 0)` + `RLIMIT_CORE=0`: no core dumps, and other processes of the same user cannot read the app's memory via ptrace / `/proc/PID/mem` (opt out for debugging: `PWDECK_ALLOW_DUMP=1`) |
-| Search | all words must match across name, username, URL, tags, folder, description (secure-note bodies are not searched) |
+| Search | all words must match across name, username, URL, tags, folder (descriptions and notes are sealed and therefore **not** searched) |
 | Audit | weak, reused, old, expired passwords; optional online breach check (Have I Been Pwned *k-anonymity*: only 5 hash chars leave the PC, on explicit click) |
 | Backup | verified copy, rotating **automatic backups** (keep last N), and an **Emergency kit** zip (vault + standalone recovery script + instructions) |
 | Import | generic CSV with auto-detected columns (Passbolt, KeePass, Bitwarden, LastPass, Chrome, 1Password… — see below), Bitwarden JSON, PW Deck JSON; duplicates skipped |
@@ -80,12 +80,24 @@ header: scrypt params + salt, key slots {password, recovery} = AES-GCM-wrapped D
 ```
 
 * The SQLite database is only ever in memory (`Connection.serialize()`) or encrypted; no plain temp file is written.
+* **Format v2 — field sealing.** Inside the database every secret value (password, TOTP secret, description/notes, card number/CVV/PIN, SSH key,
+  passphrase, custom-field values, history) is *also* encrypted on its own with AES-256-GCM, key = HKDF(data key), AAD = vault|item|column. Name, username, URLs,
+  folders and tags stay readable so the list and the search work. The database that sits in RAM while the vault is unlocked therefore holds **no plaintext
+  secrets**: a value is decrypted only when you reveal it, copy it, edit the item or run the audit/export. Old v1 vaults are migrated on first open
+  (a copy of the old file is kept as `<vault>.pre-v2.bak`; delete it once you are happy, it still contains the old layout).
 * A random 256-bit **data key** encrypts the content and is stored wrapped by a key derived from the password (scrypt N=2¹⁷, r=8: 128 MiB; "High": 256 MiB),
   and by the recovery key (HKDF). Changing the master password only rewrites the header.
 * With a keyfile, the password is first combined as `HMAC-SHA256(SHA256(keyfile), password)`. The master password is NFKC-normalised.
 * The whole file is authenticated: any modification is detected on open.
 * **Not SQLCipher.** The file is not a SQLCipher database: it is an authenticated container around a normal SQLite image. The trade-offs: no extra native
   dependency, one authenticated blob, but the whole database is loaded in RAM and rewritten on each save (fine for thousands of entries, not for gigabytes).
+* **What field sealing does and does not give you** (measured with `tests/test_memory.py`, which scans the memory of a real running process):
+  right after unlock the secrets of *no* item are in RAM (before: all of them), selecting an item does not bring its masked secrets in, and after lock
+  those never revealed are absent. It does **not** defeat an attacker who reads the whole process memory *and* understands the structure, because the
+  field key is in the same process; it removes the easy wins (`strings`/grep on a dump, swap or hibernation pages, partial dumps, forensic carving).
+  Exceptions: the TOTP secret of the *selected* item is decrypted to show the live code; whatever you revealed, copied or edited can stay in memory
+  after you hide it or lock (Python and Qt do not zero freed memory; one hidden-field value was still found after hiding in the test); the Audit and Export
+  decrypt everything while they run.
 * **Hardening limits**: `PR_SET_DUMPABLE=0` does not stop root, a kernel exploit, or malware that injects code through your launcher/environment, and the sleep lock
   relies on the desktop/logind emitting the signals. Suspend is covered by a logind *delay inhibitor*: the app holds it, locks the vault when `PrepareForSleep` arrives and only then lets suspend proceed
   (logind waits at most `InhibitDelayMaxSec`, 5 s by default). Tested against a fake logind, not a real suspend.

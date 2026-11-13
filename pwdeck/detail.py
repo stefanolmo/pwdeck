@@ -22,10 +22,16 @@ def _safe_url(u: str) -> str | None:
     return u if u.lower().startswith(("http://", "https://", "ssh://", "ftp://", "ftps://", "sftp://")) else None
 
 
+MASK = "•" * 12
+
+
 class FieldRow(QWidget):
-    def __init__(self, label: str, value: str, secret: bool, multiline: bool, emit, key: str, parent=None):
+    """One labelled value. Secret rows never hold the value: `getter()` decrypts it only when the user reveals or copies it,
+    and hiding drops the text again (fixed-width mask, so the length is not leaked either)."""
+
+    def __init__(self, label: str, getter, secret: bool, emit, key: str, mono: bool = False, parent=None):
         super().__init__(parent)
-        self.value, self.secret, self.shown = value, secret, not secret
+        self.getter, self.secret, self.shown = getter, secret, False
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 2, 0, 2)
         col = QVBoxLayout()
@@ -35,17 +41,16 @@ class FieldRow(QWidget):
         self.lbl = QLabel()
         self.lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.lbl.setWordWrap(True)
-        self.lbl.setStyleSheet(f"font-family:{theme.MONO}; font-size:13px;" if (secret or key in ("username", "number")) else "font-size:13px;")
+        self.lbl.setStyleSheet(f"font-family:{theme.MONO}; font-size:13px;" if (secret or mono) else "font-size:13px;")
         col.addWidget(cap)
         col.addWidget(self.lbl)
         lay.addLayout(col, 1)
-        self.multiline = multiline
         if secret:
             self.eye = mini_button("eye", "Show / hide", checkable=True)
             self.eye.toggled.connect(self._toggle)
             lay.addWidget(self.eye, 0, Qt.AlignTop)
         cp = mini_button("copy", "Copy")
-        cp.clicked.connect(lambda: emit(label, value, secret, key))
+        cp.clicked.connect(lambda: emit(label, self.getter(), secret, key))
         lay.addWidget(cp, 0, Qt.AlignTop)
         self._render()
 
@@ -55,7 +60,7 @@ class FieldRow(QWidget):
         self._render()
 
     def _render(self) -> None:
-        self.lbl.setText(self.value if self.shown else "•" * min(max(len(self.value), 8), 24))
+        self.lbl.setText(self.getter() if (self.shown or not self.secret) else MASK)
 
 
 class DetailPanel(QWidget):
@@ -94,7 +99,8 @@ class DetailPanel(QWidget):
         if w:
             w.deleteLater()
 
-    def show_item(self, it: Item | None, folder: str = "") -> None:
+    def show_item(self, it: Item | None, folder: str = "", reveal=None) -> None:
+        """`it` is a light item (no secret values); `reveal(key)` decrypts a single value on demand."""
         self.clear()
         if it is None:
             return
@@ -150,21 +156,31 @@ class DetailPanel(QWidget):
         card = Card()
         any_row = False
         for f in type_fields(it.type):
-            v = it.get(f.key)
-            if not v:
-                continue
-            any_row = True
+            key = f.key
             if f.kind == "uris":
-                for u in v:
+                for u in it.uris:
+                    any_row = True
                     card.body.addWidget(self._uri_row(f.label, u))
-            elif f.kind == "totp":
-                card.body.addWidget(self._totp_row(f.label, v))
-            else:
-                secret = f.kind in ("secret", "secretmulti")
-                card.body.addWidget(FieldRow(f.label, v, secret, f.kind in ("multi", "secretmulti"), self._emit, f.key))
-        for cf in it.fields:
-            any_row = True
-            card.body.addWidget(FieldRow(cf.get("label") or "Field", cf.get("value", ""), bool(cf.get("hidden")), False, self._emit, "custom"))
+            elif key == "username":
+                if it.username:
+                    any_row = True
+                    card.body.addWidget(FieldRow(f.label, lambda v=it.username: v, False, self._emit, key, mono=True))
+            elif key in it.has:
+                any_row = True
+                if f.kind == "totp":
+                    card.body.addWidget(self._totp_row(f.label, reveal(key)))
+                elif f.kind in ("secret", "secretmulti") or key == "description":     # descriptions often hold recovery codes
+                    card.body.addWidget(FieldRow(f.label, lambda k=key: reveal(k), True, self._emit, key))
+                else:                                           # description, holder, expiry, public key…: shown when selected
+                    card.body.addWidget(FieldRow(f.label, (lambda v: lambda: v)(reveal(key)), False, self._emit, key, mono=(key == "number")))
+        for i, cf in enumerate(it.fields):
+            if f"field:{i}" in it.has:
+                any_row = True
+                k = f"field:{i}"
+                if cf.get("hidden"):
+                    card.body.addWidget(FieldRow(cf.get("label") or "Field", lambda k=k: reveal(k), True, self._emit, "custom"))
+                else:
+                    card.body.addWidget(FieldRow(cf.get("label") or "Field", (lambda v: lambda: v)(reveal(k)), False, self._emit, "custom"))
         if not any_row:
             card.body.addWidget(QLabel("(empty)", objectName="muted"))
         lay.addWidget(card)
@@ -177,7 +193,7 @@ class DetailPanel(QWidget):
             expired = it.expires < time.time()
             meta.append(("⚠ EXPIRED " if expired else "Expires ") + fmt_ts(it.expires)[:10])
         meta.append(f"Modified {fmt_ts(it.modified)} · Created {fmt_ts(it.created)}")
-        if it.password:
+        if "password" in it.has:
             meta.append(f"Password changed {fmt_ts(it.pw_changed)[:10]}")
         m = QLabel("\n".join(meta))
         m.setObjectName("muted")

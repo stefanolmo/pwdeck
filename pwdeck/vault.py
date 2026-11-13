@@ -14,7 +14,7 @@ from . import crypto
 from .crypto import (CorruptVaultError, NotAVaultError, VaultError, WrongPasswordError)  # noqa: F401  (re-exported)
 from .types import COLUMN_KEYS
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2          # 2 = secret columns hold sealed (field-encrypted) values; 1 = plaintext columns (migrated on open)
 SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE folders(id TEXT PRIMARY KEY, parent_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
@@ -35,6 +35,7 @@ CREATE INDEX idx_items_folder ON items(folder_id);
 CREATE INDEX idx_items_deleted ON items(deleted);
 """
 SECRET_KEYS = ("password", "totp", "number", "cvv", "pin", "private_key", "passphrase", "description")
+SEALED_COLUMNS = ("password", "totp", "description")
 
 
 class VaultChangedError(VaultError):
@@ -70,6 +71,9 @@ class Item:
     expires: float | None = None
     deleted: float | None = None
     last_used: float | None = None
+    # keys that hold a value: columns, `extra` keys and "field:<i>" for custom fields. Filled when loading, so the UI can
+    # list what an item contains without decrypting it (light items have empty secret values).
+    has: set = field(default_factory=set)
 
     def get(self, key: str):
         return getattr(self, key) if key in COLUMN_KEYS else self.extra.get(key, "")
@@ -89,14 +93,6 @@ class Item:
         if self.fields:
             d["fields"] = self.fields
         return d
-
-
-def _row_to_item(r: sqlite3.Row, tags: list[str]) -> Item:
-    return Item(type=r["type"], name=r["name"], id=r["id"], folder_id=r["folder_id"], username=r["username"],
-                password=r["password"], uris=json.loads(r["uris"]), description=r["description"], totp=r["totp"],
-                fields=json.loads(r["fields"]), extra=json.loads(r["extra"]), tags=sorted(tags),
-                favorite=bool(r["favorite"]), created=r["created"] or 0, modified=r["modified"] or 0,
-                pw_changed=r["pw_changed"] or 0, expires=r["expires"], deleted=r["deleted"], last_used=r["last_used"])
 
 
 def _stat(path: str):
@@ -129,6 +125,9 @@ class Vault:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys=ON")
         self._dek = dek
+        self._fk = crypto.derive_field_key(dek)
+        self._vid: str | None = None
+        self.db.execute("PRAGMA secure_delete=ON")        # overwrite deleted/updated content inside the in-memory image
         self._header = header
         self._batch = 0
         self._dirty = False
@@ -175,6 +174,12 @@ class Vault:
         v._stat = st
         if lock:
             v._acquire_lock()
+        if int(ver[0]) < SCHEMA_VERSION:
+            try:
+                v._migrate_v1()
+            except Exception:
+                v.close_quietly()
+                raise
         return v
 
     @staticmethod
@@ -185,13 +190,19 @@ class Vault:
         return {"keyfile": bool(header["kdf"].get("keyfile")), "recovery": "recovery" in header["slots"],
                 "kdf": f"scrypt N=2^{header['kdf']['log_n']}"}
 
+    def close_quietly(self) -> None:
+        with contextlib.suppress(Exception):
+            self.db.close()
+        self._dek = self._fk = None
+        self._release_lock()
+
     def close(self) -> None:
         if self._dek is None:
             return
         if self._dirty:
             self.save()                 # on failure the exception propagates and the vault stays open: nothing is lost
         self.db.close()
-        self._dek = None
+        self._dek = self._fk = None
         self._release_lock()
 
     # ------------------------------------------------------------------ instance lock (best effort)
@@ -264,6 +275,11 @@ class Vault:
             db.deserialize(plain)
             if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise CorruptVaultError("integrity check failed")
+            db.row_factory = sqlite3.Row
+            for r in db.execute("SELECT * FROM items"):                  # every sealed value must authenticate
+                self._load(r, [], full=True)
+            for r in db.execute("SELECT item_id, snapshot FROM history"):
+                crypto.unseal(self._fk, self._aad(r["item_id"], "history"), crypto.b64d(r["snapshot"]))
             return db.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         finally:
             db.close()
@@ -292,7 +308,9 @@ class Vault:
 
     @property
     def vault_id(self) -> str:
-        return self.db.execute("SELECT value FROM meta WHERE key='vault_id'").fetchone()[0]
+        if self._vid is None:
+            self._vid = self.db.execute("SELECT value FROM meta WHERE key='vault_id'").fetchone()[0]
+        return self._vid
 
     # ------------------------------------------------------------------ folders
     def add_folder(self, name: str, parent_id: str | None = None) -> str:
@@ -356,23 +374,86 @@ class Vault:
                 todo.extend(kids.get(x, []))
         return out
 
-    # ------------------------------------------------------------------ items
+    # ------------------------------------------------------------------ sealing helpers
+    def _aad(self, iid: str, col: str, sub: str = "") -> bytes:
+        return f"{self.vault_id}|{iid}|{col}|{sub}".encode()
+
+    def _seal_str(self, iid: str, col: str, text: str, sub: str = "") -> bytes:
+        return crypto.seal(self._fk, self._aad(iid, col, sub), text.encode("utf-8")) if text else b""
+
+    def _open_str(self, iid: str, col: str, blob, sub: str = "") -> str:
+        if not blob:
+            return ""
+        return crypto.unseal(self._fk, self._aad(iid, col, sub), bytes(blob)).decode("utf-8")
+
+    def _seal_map(self, iid: str, m: dict) -> str:
+        return json.dumps({k: crypto.b64e(self._seal_str(iid, "extra", str(v), k)) for k, v in m.items() if v})
+
+    def _seal_fields(self, iid: str, fields: list[dict]) -> str:
+        return json.dumps([{"label": f.get("label", ""), "hidden": bool(f.get("hidden")),
+                            "value": crypto.b64e(self._seal_str(iid, "fields", f.get("value", ""), f"field:{i}"))}
+                           for i, f in enumerate(fields)])
+
+    def _load(self, r: sqlite3.Row, tags: list[str], full: bool) -> Item:
+        iid = r["id"]
+        extra_raw, fields_raw = json.loads(r["extra"]), json.loads(r["fields"])
+        has = {c for c in SEALED_COLUMNS if r[c]}
+        has |= {k for k, v in extra_raw.items() if v}
+        has |= {f"field:{i}" for i, f in enumerate(fields_raw) if f.get("value")}
+        it = Item(type=r["type"], name=r["name"], id=iid, folder_id=r["folder_id"], username=r["username"],
+                  uris=json.loads(r["uris"]), tags=sorted(tags), favorite=bool(r["favorite"]), created=r["created"] or 0,
+                  modified=r["modified"] or 0, pw_changed=r["pw_changed"] or 0, expires=r["expires"], deleted=r["deleted"],
+                  last_used=r["last_used"], has=has)
+        if full:
+            it.password, it.totp = self._open_str(iid, "password", r["password"]), self._open_str(iid, "totp", r["totp"])
+            it.description = self._open_str(iid, "description", r["description"])
+            it.extra = {k: self._open_str(iid, "extra", crypto.b64d(v), k) for k, v in extra_raw.items() if v}
+            it.fields = [{"label": f["label"], "hidden": f["hidden"],
+                          "value": self._open_str(iid, "fields", crypto.b64d(f["value"]), f"field:{i}") if f.get("value") else ""}
+                         for i, f in enumerate(fields_raw)]
+        else:                                                   # light item: structure only, no secret values
+            it.fields = [{"label": f["label"], "hidden": f["hidden"], "value": ""} for f in fields_raw]
+        return it
+
     def _write_item(self, it: Item, insert: bool) -> None:
-        vals = (it.type, it.name.strip() or "(no name)", it.folder_id, it.username, it.password, json.dumps(it.uris),
-                it.description, it.totp, json.dumps(it.fields), json.dumps(it.extra), int(it.favorite),
+        iid = it.id
+        vals = (it.type, it.name.strip() or "(no name)", it.folder_id, it.username, self._seal_str(iid, "password", it.password),
+                json.dumps(it.uris), self._seal_str(iid, "description", it.description), self._seal_str(iid, "totp", it.totp),
+                self._seal_fields(iid, it.fields), self._seal_map(iid, it.extra), int(it.favorite),
                 it.modified, it.pw_changed, it.expires, it.deleted, it.last_used)
         if insert:
             self.db.execute("INSERT INTO items(type,name,folder_id,username,password,uris,description,totp,fields,extra,"
                             "favorite,modified,pw_changed,expires,deleted,last_used,id,created) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                            vals + (it.id, it.created))
+                            vals + (iid, it.created))
         else:
             self.db.execute("UPDATE items SET type=?,name=?,folder_id=?,username=?,password=?,uris=?,description=?,totp=?,"
                             "fields=?,extra=?,favorite=?,modified=?,pw_changed=?,expires=?,deleted=?,last_used=? WHERE id=?",
-                            vals + (it.id,))
-        self.db.execute("DELETE FROM tags WHERE item_id=?", (it.id,))
-        self.db.executemany("INSERT OR IGNORE INTO tags VALUES(?,?)",
-                            [(it.id, t.strip()) for t in it.tags if t.strip()])
+                            vals + (iid,))
+        self.db.execute("DELETE FROM tags WHERE item_id=?", (iid,))
+        self.db.executemany("INSERT OR IGNORE INTO tags VALUES(?,?)", [(iid, t.strip()) for t in it.tags if t.strip()])
 
+    def _migrate_v1(self) -> None:
+        """v1 stored secrets as plain columns inside the (encrypted) container. Seal them, keep the old file as *.pre-v2.bak."""
+        bak = self.path + ".pre-v2.bak"
+        if not os.path.exists(bak):
+            shutil.copy2(self.path, bak)
+        db = self.db
+        for r in db.execute("SELECT id,password,description,totp,fields,extra FROM items").fetchall():
+            iid = r["id"]
+            extra, fields = json.loads(r["extra"]), json.loads(r["fields"])
+            db.execute("UPDATE items SET password=?, description=?, totp=?, fields=?, extra=? WHERE id=?",
+                       (self._seal_str(iid, "password", r["password"] or ""), self._seal_str(iid, "description", r["description"] or ""),
+                        self._seal_str(iid, "totp", r["totp"] or ""), self._seal_fields(iid, fields), self._seal_map(iid, extra), iid))
+        for h in db.execute("SELECT id,item_id,snapshot FROM history").fetchall():
+            db.execute("UPDATE history SET snapshot=? WHERE id=?",
+                       (crypto.b64e(crypto.seal(self._fk, self._aad(h["item_id"], "history"), h["snapshot"].encode())), h["id"]))
+        db.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
+        db.commit()
+        db.execute("VACUUM")                                    # drop the freed pages that still held the old plaintext
+        self._dirty = True
+        self.save(force=True)
+
+    # ------------------------------------------------------------------ items
     def add_item(self, it: Item) -> str:
         now = time.time()
         it.created = it.created or now
@@ -388,8 +469,9 @@ class Vault:
             raise VaultError("item not found")
         it.modified = time.time()
         if old.secrets_snapshot() != it.secrets_snapshot():
+            snap = json.dumps(old.secrets_snapshot()).encode()
             self.db.execute("INSERT INTO history(item_id,ts,snapshot) VALUES(?,?,?)",
-                            (it.id, old.modified, json.dumps(old.secrets_snapshot())))
+                            (it.id, old.modified, crypto.b64e(crypto.seal(self._fk, self._aad(it.id, "history"), snap))))
             self.db.execute("DELETE FROM history WHERE item_id=? AND id NOT IN "
                             "(SELECT id FROM history WHERE item_id=? ORDER BY id DESC LIMIT 25)", (it.id, it.id))
         if old.password != it.password:
@@ -397,19 +479,35 @@ class Vault:
         self._write_item(it, False)
         self._changed()
 
-    def get_item(self, iid: str) -> Item | None:
+    def get_item(self, iid: str, full: bool = True) -> Item | None:
+        """full=True decrypts every secret (editing, export); full=False returns a light item (see `Item.has`)."""
         r = self.db.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
-        return _row_to_item(r, self._tags(iid)) if r else None
+        return self._load(r, self._tags(iid), full) if r else None
+
+    def reveal(self, iid: str, key: str) -> str:
+        """Decrypts ONE secret value: a column (password/totp/description), an `extra` key, or 'field:<i>'."""
+        r = self.db.execute("SELECT password,totp,description,extra,fields FROM items WHERE id=?", (iid,)).fetchone()
+        if r is None:
+            raise VaultError("item not found")
+        if key in SEALED_COLUMNS:
+            return self._open_str(iid, key, r[key])
+        if key.startswith("field:"):
+            i = int(key[6:])
+            f = json.loads(r["fields"])[i]
+            return self._open_str(iid, "fields", crypto.b64d(f["value"]), key) if f.get("value") else ""
+        v = json.loads(r["extra"]).get(key)
+        return self._open_str(iid, "extra", crypto.b64d(v), key) if v else ""
 
     def _tags(self, iid: str) -> list[str]:
         return [x[0] for x in self.db.execute("SELECT tag FROM tags WHERE item_id=?", (iid,))]
 
-    def items(self, trash: bool = False) -> list[Item]:
+    def items(self, trash: bool = False, secrets: bool = False) -> list[Item]:
+        """Light items by default (no secret values, `has` tells what exists). secrets=True decrypts everything."""
         tagmap: dict[str, list[str]] = {}
         for iid, tag in self.db.execute("SELECT item_id, tag FROM tags"):
             tagmap.setdefault(iid, []).append(tag)
         q = "SELECT * FROM items WHERE deleted IS NOT NULL" if trash else "SELECT * FROM items WHERE deleted IS NULL"
-        return [_row_to_item(r, tagmap.get(r["id"], [])) for r in self.db.execute(q + " ORDER BY name COLLATE NOCASE")]
+        return [self._load(r, tagmap.get(r["id"], []), secrets) for r in self.db.execute(q + " ORDER BY name COLLATE NOCASE")]
 
     def trash_item(self, iid: str) -> None:
         self.db.execute("UPDATE items SET deleted=? WHERE id=?", (time.time(), iid))
@@ -441,15 +539,19 @@ class Vault:
         self._dirty = True                                # saved with the next real change / on close: no write per copy
 
     def history(self, iid: str) -> list[dict]:
-        return [{"id": r["id"], "ts": r["ts"], "data": json.loads(r["snapshot"])}
+        return [{"id": r["id"], "ts": r["ts"],
+                 "data": json.loads(crypto.unseal(self._fk, self._aad(iid, "history"), crypto.b64d(r["snapshot"])))}
                 for r in self.db.execute("SELECT * FROM history WHERE item_id=? ORDER BY id DESC", (iid,))]
 
     def all_tags(self) -> list[str]:
         return [r[0] for r in self.db.execute("SELECT DISTINCT tag FROM tags ORDER BY tag COLLATE NOCASE")]
 
     def has_duplicate(self, it: Item) -> bool:
-        return any(x.type == it.type and x.name == it.name and x.username == it.username and x.password == it.password
-                   and x.uris == it.uris for x in self.items())
+        for x in self.items():                                   # light items; only candidates get their password decrypted
+            if x.type == it.type and x.name == it.name and x.username == it.username and x.uris == it.uris \
+                    and (self.reveal(x.id, "password") if "password" in x.has else "") == it.password:
+                return True
+        return False
 
     def stats(self) -> dict:
         n = self.db.execute("SELECT COUNT(*) FROM items WHERE deleted IS NULL").fetchone()[0]

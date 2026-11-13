@@ -147,7 +147,7 @@ def export_csv(vault: Vault) -> str:
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(CSV_COLUMNS)
-    for it in vault.items():
+    for it in vault.items(secrets=True):
         desc = it.description
         for k, v in it.extra.items():                       # card/ssh specific values would be lost otherwise
             if v:
@@ -161,7 +161,7 @@ def export_csv(vault: Vault) -> str:
 
 def export_json(vault: Vault) -> str:
     items = []
-    for it in vault.items():
+    for it in vault.items(secrets=True):
         items.append({"type": it.type, "name": it.name, "folder": vault.folder_path(it.folder_id), "username": it.username,
                       "password": it.password, "uris": it.uris, "description": it.description, "totp": it.totp,
                       "fields": it.fields, "extra": it.extra, "tags": it.tags, "favorite": it.favorite,

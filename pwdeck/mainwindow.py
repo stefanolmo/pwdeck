@@ -87,6 +87,7 @@ class MainWindow(QMainWindow):
         self.list.setRootIsDecorated(False)
         self.list.setAlternatingRowColors(True)
         self.list.setSortingEnabled(True)
+        self.list.sortByColumn(0, Qt.AscendingOrder)      # Qt would otherwise start descending (Z→A)
         self.list.setIconSize(QSize(17, 17))
         self.list.setColumnWidth(0, 230)
         self.list.setColumnWidth(1, 150)
@@ -212,11 +213,11 @@ class MainWindow(QMainWindow):
         except Exception as e:          # noqa: BLE001
             if QMessageBox.question(self, "Lock", f"The vault could not be saved:\n{e}\n\nLock anyway and lose the unsaved changes?") != QMessageBox.Yes:
                 return
+        self.vault = None                 # first: signals fired while the UI is cleared must not touch the closed database
         self.clip.clear()
         self.detail.clear()
         self.list.clear()
         self.sidebar.clear()
-        self.vault = None
         self._set_locked_ui(True)
 
     def _on_saved(self, _path: str) -> None:
@@ -376,8 +377,6 @@ class MainWindow(QMainWindow):
         if q:
             def hit(i: Item) -> bool:
                 hay = [i.name, i.username, " ".join(i.uris), " ".join(i.tags), v.folder_path(i.folder_id), type_label(i.type)]
-                if i.type != "note":
-                    hay.append(i.description)
                 return all(any(w in h.lower() for h in hay) for w in q.split())
             items = [i for i in items if hit(i)]
         return items
@@ -413,12 +412,14 @@ class MainWindow(QMainWindow):
         if cur is None or not self.vault:
             self.detail.show_item(None)
             return
-        it = self.vault.get_item(cur.data(0, Qt.UserRole))
-        self.detail.show_item(it, self.vault.folder_path(it.folder_id) if it else "")
+        it = self.vault.get_item(cur.data(0, Qt.UserRole), full=False)
+        iid = cur.data(0, Qt.UserRole)
+        self.detail.show_item(it, self.vault.folder_path(it.folder_id) if it else "", lambda key: self.vault.reveal(iid, key))
 
-    def current_item(self) -> Item | None:
+    def current_item(self, full: bool = False) -> Item | None:
+        """Light item by default (no secrets in memory); full=True only when editing/duplicating."""
         cur = self.list.currentItem()
-        return self.vault.get_item(cur.data(0, Qt.UserRole)) if cur and self.vault else None
+        return self.vault.get_item(cur.data(0, Qt.UserRole), full=full) if cur and self.vault else None
 
     # ------------------------------------------------------------------ context menus
     def _list_menu(self, pos) -> None:
@@ -432,9 +433,9 @@ class MainWindow(QMainWindow):
         else:
             if it.username:
                 m.addAction(icon("copy"), "Copy username\tCtrl+U", lambda: self.copy_field("username"))
-            if it.password:
+            if "password" in it.has:
                 m.addAction(icon("copy"), "Copy password\tCtrl+P", lambda: self.copy_field("password"))
-            if it.totp:
+            if "totp" in it.has:
                 m.addAction(icon("clock"), "Copy TOTP code\tCtrl+T", lambda: self.copy_field("totp"))
             if it.uri:
                 m.addAction(icon("globe"), "Open URL", self.open_url)
@@ -483,7 +484,7 @@ class MainWindow(QMainWindow):
             self.refresh_list(d.item.id)
 
     def edit_item(self) -> None:
-        it = self.current_item()
+        it = self.current_item(full=True)
         if not it or it.deleted:
             return
         d = ItemDialog(self.vault, self.qs, it, parent=self)
@@ -493,7 +494,7 @@ class MainWindow(QMainWindow):
             self.refresh_list(d.item.id)
 
     def duplicate_item(self) -> None:
-        it = self.current_item()
+        it = self.current_item(full=True)
         if it:
             import copy
             from .vault import new_id
@@ -578,16 +579,21 @@ class MainWindow(QMainWindow):
         it = self.current_item()
         if not it:
             return
+        if key == "username":
+            if it.username:
+                self.copy_value("Username", it.username, False, key)
+            return
+        if key not in it.has:
+            return
+        v = self.vault.reveal(it.id, key)
         if key == "totp":
             from . import totp
             try:
-                self.copy_value("TOTP code", totp.parse(it.totp).code(), True, "totp") if it.totp else None
+                self.copy_value("TOTP code", totp.parse(v).code(), True, "totp")
             except ValueError:
                 self.statusBar().showMessage("Invalid TOTP secret", 4000)
             return
-        v = it.get(key)
-        if v:
-            self.copy_value(key.capitalize(), v, key != "username", key)
+        self.copy_value(key.capitalize(), v, True, key)
 
     def open_url(self) -> None:
         from PySide6.QtCore import QUrl
@@ -605,7 +611,7 @@ class MainWindow(QMainWindow):
     def open_audit(self) -> None:
         if not self.vault:
             return
-        d = AuditDialog(self.vault.items(), self.qs, self)
+        d = AuditDialog(self.vault.items(secrets=True), self.qs, self)   # the audit needs every password: decrypted only while it is open
 
         def goto(iid):
             d.accept()

@@ -6,7 +6,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget)
 
 from . import theme, totp
-from .dialogs import fmt_ts
+from .dialogs import fmt_size, fmt_ts
 from .theme import icon
 from .itemtypes import type_fields, type_label
 from .vault import Item
@@ -70,6 +70,7 @@ class DetailPanel(QWidget):
     restoreRequested = Signal()
     favoriteToggled = Signal()
     historyRequested = Signal()
+    saveAttachmentRequested = Signal(str, str)       # attachment id, file name
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -99,7 +100,7 @@ class DetailPanel(QWidget):
         if w:
             w.deleteLater()
 
-    def show_item(self, it: Item | None, folder: str = "", reveal=None) -> None:
+    def show_item(self, it: Item | None, folder: str = "", reveal=None, attachments: list | None = None) -> None:
         """`it` is a light item (no secret values); `reveal(key)` decrypts a single value on demand."""
         self.clear()
         if it is None:
@@ -184,6 +185,18 @@ class DetailPanel(QWidget):
         if not any_row:
             card.body.addWidget(QLabel("(empty)", objectName="muted"))
         lay.addWidget(card)
+        if attachments:
+            ac = Card("Attachments")
+            for a in attachments:
+                row = QHBoxLayout()
+                lbl = QLabel(f"{a['name']}  <span style='color:{theme.MUTED}'>{fmt_size(a['size'])}</span>")
+                lbl.setTextFormat(Qt.RichText)
+                row.addWidget(lbl, 1)
+                b = mini_button("backup", "Save a copy…")
+                b.clicked.connect(lambda _=False, aid=a["id"], nm=a["name"]: self.saveAttachmentRequested.emit(aid, nm))
+                row.addWidget(b)
+                ac.body.addLayout(row)
+            lay.addWidget(ac)
 
         meta = []
         if it.tags:

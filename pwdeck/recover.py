@@ -6,6 +6,7 @@ next to a backup and use it on any machine, with no GUI.
     python3 pwdeck_recover.py info    vault.pwdeck
     python3 pwdeck_recover.py decrypt vault.pwdeck -o vault.sqlite        # plain SQLite file (open it with any tool!)
     python3 pwdeck_recover.py csv     vault.pwdeck -o vault.csv           # plain-text export
+    python3 pwdeck_recover.py attachments vault.pwdeck -o DIR             # attached files, one folder per item
     options: --keyfile FILE   --recovery   (ask for the recovery key instead of the master password)
 
 The outputs are UNENCRYPTED: delete them securely when done.
@@ -93,6 +94,11 @@ def unsealed_db(plain, dek):
         blob = b64(h["snapshot"])
         db.execute("UPDATE history SET snapshot=? WHERE id=?",
                    (AESGCM(fk).decrypt(blob[1:13], blob[13:], f"{vid}|{h['item_id']}|history|".encode()).decode(), h["id"]))
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='attachments'").fetchone():
+        for a in db.execute("SELECT id,item_id,data FROM attachments").fetchall():
+            blob = bytes(a["data"])
+            db.execute("UPDATE attachments SET data=? WHERE id=?",
+                       (AESGCM(fk).decrypt(blob[1:13], blob[13:], f"{vid}|{a['item_id']}|attachment|{a['id']}".encode()), a["id"]))
     db.execute("UPDATE meta SET value='1' WHERE key='schema'")      # now it is a plain (v1 layout) database
     db.commit()
     db.execute("VACUUM")
@@ -101,7 +107,7 @@ def unsealed_db(plain, dek):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["info", "decrypt", "csv"])
+    ap.add_argument("command", choices=["info", "decrypt", "csv", "attachments"])
     ap.add_argument("vault")
     ap.add_argument("-o", "--output")
     ap.add_argument("--keyfile")
@@ -126,6 +132,21 @@ def main():
     except InvalidTag:
         sys.exit("the vault content is damaged (authentication failed)")
     db = unsealed_db(plain, dek)
+    if a.command == "attachments":
+        n = 0
+        os.makedirs(a.output, mode=0o700, exist_ok=True)
+        if db.execute("SELECT 1 FROM sqlite_master WHERE name='attachments'").fetchone():
+            for r in db.execute("SELECT i.name AS item, a.name AS name, a.data AS data, a.id AS id FROM attachments a JOIN items i ON i.id=a.item_id"):
+                d = os.path.join(a.output, "".join(c if c.isalnum() or c in " ._-" else "_" for c in r["item"]) or "item")
+                os.makedirs(d, mode=0o700, exist_ok=True)
+                fn = os.path.basename(r["name"]) or "file"
+                path = os.path.join(d, fn if not os.path.exists(os.path.join(d, fn)) else f"{r['id'][:6]}-{fn}")
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(bytes(r["data"]))
+                n += 1
+        print(f"extracted {n} attachment(s) into {a.output}")
+        return
     if a.command == "decrypt":
         fd = os.open(a.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as f:

@@ -9,7 +9,7 @@ import pytest
 
 from pwdeck import crypto, generator, importers, totp
 from pwdeck.backup import make_bundle
-from pwdeck.vault import (CorruptVaultError, Item, NotAVaultError, Vault, VaultChangedError, VaultLockedError,
+from pwdeck.vault import (CorruptVaultError, Item, NotAVaultError, Vault, VaultChangedError, VaultError, VaultLockedError,
                           WrongPasswordError, auto_backup)
 
 
@@ -422,3 +422,70 @@ def test_recover_tool_handles_scrypt_vaults_too(tmp_path):
     assert sqlite3.connect(out).execute("SELECT password FROM items").fetchone() == ("pw-123",)
     info = subprocess.run([sys.executable, tool, "info", p], capture_output=True, text=True)
     assert "scrypt" in info.stdout
+
+
+# ------------------------------------------------------------------ attachments (schema v3)
+def test_attachments_are_sealed_listed_and_cascade(vault, tmp_path):
+    iid = vault.add_item(Item(name="Passport"))
+    data = b"%PDF-1.7 ATT-marker-777 " + os.urandom(2000)
+    aid = vault.add_attachment(iid, "../../etc/scan.pdf", data)                 # path components are stripped
+    assert vault.attachments(iid) == [{"id": aid, "name": "scan.pdf", "size": len(data), "created": vault.attachments(iid)[0]["created"]}]
+    assert vault.get_attachment(aid) == ("scan.pdf", data)
+    assert b"ATT-marker-777" not in bytes(vault.db.serialize())                  # sealed inside the in-memory image
+    assert vault.items()[0].attachment_count == 1 and vault.get_item(iid, full=False).attachment_count == 1
+    assert vault.stats()["attachments"] == 1 and vault.stats()["attachment_bytes"] == len(data)
+    assert vault.verify_file(vault.copy_to(str(tmp_path))) == 1
+    with pytest.raises(VaultError):
+        vault.add_attachment(iid, "big.bin", b"x" * (16 * 1024 * 1024 + 1))
+    with pytest.raises(VaultError):
+        vault.add_attachment("missing", "a", b"1")
+    vault.purge_item(iid)                                                         # cascade
+    assert vault.db.execute("SELECT COUNT(*) FROM attachments").fetchone()[0] == 0
+
+
+def test_attachment_is_bound_to_its_item_and_tamper_is_detected(vault, tmp_path):
+    a = vault.add_item(Item(name="a"))
+    b = vault.add_item(Item(name="b"))
+    x = vault.add_attachment(a, "one.txt", b"one")
+    vault.db.execute("UPDATE attachments SET item_id=? WHERE id=?", (b, x))        # move it to another item
+    with pytest.raises(CorruptVaultError):
+        vault.get_attachment(x)
+    vault.db.execute("UPDATE attachments SET item_id=? WHERE id=?", (a, x))
+    blob = bytearray(vault.db.execute("SELECT data FROM attachments WHERE id=?", (x,)).fetchone()[0])
+    blob[-1] ^= 1
+    vault.db.execute("UPDATE attachments SET data=? WHERE id=?", (bytes(blob), x))
+    with pytest.raises(CorruptVaultError):
+        vault.copy_to(str(tmp_path / "bad.pwdeck"))
+
+
+def test_v2_vault_is_upgraded_to_v3_with_backup(vpath):
+    from pwdeck import vault as vmod
+    dek, header, _ = crypto.create_keys("pw", None, "fast")
+    db = sqlite3.connect(":memory:")
+    db.executescript(vmod.SCHEMA)
+    db.execute("DROP TABLE attachments")
+    for k, v in (("schema", "2"), ("vault_id", "vid-2"), ("created", "0")):
+        db.execute("INSERT INTO meta VALUES(?,?)", (k, v))
+    db.execute("INSERT INTO items(id,type,name,created,modified,pw_changed) VALUES('i1','password','Old',1,1,1)")
+    db.commit()
+    crypto.atomic_write(vpath, crypto.encode(header, dek, db.serialize()))
+    original = open(vpath, "rb").read()
+    v = Vault.open(vpath, "pw")
+    assert open(vpath + ".pre-v3.bak", "rb").read() == original
+    aid = v.add_attachment("i1", "n.txt", b"hello")
+    v.close()
+    v = Vault.open(vpath, "pw")                                                    # already v3: no second upgrade
+    assert v.get_attachment(aid) == ("n.txt", b"hello") and v.items()[0].attachment_count == 1
+    v.close()
+
+
+def test_recover_tool_extracts_attachments(vault, vpath, tmp_path):
+    iid = vault.add_item(Item(name="Tax/2024"))
+    vault.add_attachment(iid, "return.pdf", b"PDFDATA")
+    tool = os.path.join(os.path.dirname(__file__), "..", "pwdeck", "recover.py")
+    out = str(tmp_path / "att")
+    r = subprocess.run([sys.executable, "-c",
+                        f"import getpass,sys; getpass.getpass=lambda p='': 'correct horse'; sys.argv=['x','attachments',{vpath!r},'-o',{out!r}];"
+                        f"import runpy; runpy.run_path({tool!r}, run_name='__main__')"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "att" / "Tax_2024" / "return.pdf").read_bytes() == b"PDFDATA"

@@ -5,7 +5,7 @@ import time
 
 from PySide6.QtCore import QDate, QSettings, Qt, QThread, Signal
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
+from PySide6.QtWidgets import (QListWidget, QListWidgetItem, QCheckBox, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QFileDialog,
                                QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
                                QPushButton, QSlider, QSpinBox, QTableWidget, QTableWidgetItem, QTabWidget, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -13,12 +13,19 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialog
 from . import audit, generator, theme, totp
 from .theme import icon
 from .itemtypes import TYPE_ORDER, TYPES, type_fields, type_label
-from .vault import Item, Vault
+from .vault import MAX_ATTACHMENT, Item, Vault, VaultError
 from .widgets import PasswordEdit, StrengthBar, mini_button
 
 
 def fmt_ts(ts: float | None) -> str:
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "—"
+
+
+def fmt_size(n: int) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if n < 1024 or unit == "GiB":
+            return f"{n} B" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
 
 
 def load_gen_options(qs: QSettings) -> generator.GenOptions:
@@ -108,7 +115,7 @@ class ItemDialog(QDialog):
         self.vault, self.qs = vault, qs
         self.item = item or Item(folder_id=folder_id)
         self.setWindowTitle("Edit item" if item else "New item")
-        self.resize(560, 700)
+        self.resize(580, 800)
         lay = QVBoxLayout(self)
         top = QFormLayout()
         self.type_combo = QComboBox()
@@ -178,6 +185,26 @@ class ItemDialog(QDialog):
         r.addWidget(b_del)
         r.addStretch(1)
         lay.addLayout(r)
+        # attachments
+        lay.addWidget(QLabel("ATTACHMENTS", objectName="cardTitle"))
+        self.att = QListWidget()
+        self.att.setMaximumHeight(92)
+        self.att_existing = vault.attachments(self.item.id) if item else []
+        self.att_pending: list[tuple[str, bytes]] = []
+        self.att_removed: set[str] = set()
+        lay.addWidget(self.att)
+        ar = QHBoxLayout()
+        b_aadd = QPushButton("＋ Attach file…")
+        b_aadd.clicked.connect(self._add_att)
+        b_asave = QPushButton("Save as…")
+        b_asave.clicked.connect(self._save_att)
+        b_adel = QPushButton("Remove")
+        b_adel.clicked.connect(self._remove_att)
+        for b in (b_aadd, b_asave, b_adel):
+            ar.addWidget(b)
+        ar.addStretch(1)
+        lay.addLayout(ar)
+        self._refresh_att()
         self.err = QLabel("")
         self.err.setStyleSheet(f"color:{theme.DANGER};")
         lay.addWidget(self.err)
@@ -188,6 +215,68 @@ class ItemDialog(QDialog):
         lay.addWidget(bb)
         self._cur_type = self.item.type
         self.type_combo.currentIndexChanged.connect(self._type_changed)
+
+    # -- attachments (applied to the vault only when the item is saved: see apply_attachments)
+    def _refresh_att(self) -> None:
+        self.att.clear()
+        for a in self.att_existing:
+            if a["id"] not in self.att_removed:
+                it = QListWidgetItem(f"{a['name']}   ({fmt_size(a['size'])})")
+                it.setData(Qt.UserRole, ("old", a["id"]))
+                self.att.addItem(it)
+        for i, (name, data) in enumerate(self.att_pending):
+            it = QListWidgetItem(f"{name}   ({fmt_size(len(data))})  — new")
+            it.setData(Qt.UserRole, ("new", i))
+            self.att.addItem(it)
+
+    def _add_att(self) -> None:
+        import os
+        paths, _ = QFileDialog.getOpenFileNames(self, "Attach files")
+        for p in paths:
+            try:
+                if os.path.getsize(p) > MAX_ATTACHMENT:
+                    self.err.setText(f"{os.path.basename(p)} is larger than {MAX_ATTACHMENT // (1 << 20)} MiB: not attached.")
+                    continue
+                with open(p, "rb") as f:
+                    self.att_pending.append((os.path.basename(p), f.read()))
+            except OSError as e:
+                self.err.setText(str(e))
+        self._refresh_att()
+
+    def _selected_att(self):
+        cur = self.att.currentItem()
+        return cur.data(Qt.UserRole) if cur else None
+
+    def _save_att(self) -> None:
+        sel = self._selected_att()
+        if not sel:
+            return
+        kind, ref = sel
+        name, data = self.vault.get_attachment(ref) if kind == "old" else self.att_pending[ref]
+        p, _ = QFileDialog.getSaveFileName(self, "Save attachment", name)
+        if p:
+            from .importers import write_private_bytes
+            write_private_bytes(p, data)
+
+    def _remove_att(self) -> None:
+        sel = self._selected_att()
+        if not sel:
+            return
+        kind, ref = sel
+        if kind == "old":
+            self.att_removed.add(ref)
+        else:
+            del self.att_pending[ref]
+        self._refresh_att()
+
+    def apply_attachments(self, vault: Vault, item_id: str) -> None:
+        """Call after the item itself was saved: removes / adds the attachments chosen in the dialog."""
+        for aid in self.att_removed:
+            vault.delete_attachment(aid)
+        with vault.batch():
+            for name, data in self.att_pending:
+                vault.add_attachment(item_id, name, data)
+        self.att_removed, self.att_pending = set(), []
 
     # -- dynamic form
     def _add_cf(self, label="", value="", hidden=False):

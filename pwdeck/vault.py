@@ -14,7 +14,13 @@ from . import crypto
 from .crypto import (CorruptVaultError, NotAVaultError, VaultError, WrongPasswordError)  # noqa: F401  (re-exported)
 from .itemtypes import COLUMN_KEYS
 
-SCHEMA_VERSION = 2          # 2 = secret columns hold sealed (field-encrypted) values; 1 = plaintext columns (migrated on open)
+SCHEMA_VERSION = 3          # 3 = + attachments table; 2 = secret columns hold sealed values; 1 = plaintext columns (migrated on open)
+MAX_ATTACHMENT = 16 * 1024 * 1024      # per file: the whole vault lives in RAM and is rewritten at every save
+ATTACH_DDL = """
+CREATE TABLE IF NOT EXISTS attachments(id TEXT PRIMARY KEY, item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                                       name TEXT NOT NULL, size INTEGER NOT NULL, created REAL, data BLOB NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_att_item ON attachments(item_id);
+"""
 SCHEMA = """
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE folders(id TEXT PRIMARY KEY, parent_id TEXT REFERENCES folders(id) ON DELETE SET NULL,
@@ -33,7 +39,7 @@ CREATE TABLE history(id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL
                      ts REAL NOT NULL, snapshot TEXT NOT NULL);
 CREATE INDEX idx_items_folder ON items(folder_id);
 CREATE INDEX idx_items_deleted ON items(deleted);
-"""
+""" + ATTACH_DDL
 SECRET_KEYS = ("password", "totp", "number", "cvv", "pin", "private_key", "passphrase", "description")
 SEALED_COLUMNS = ("password", "totp", "description")
 
@@ -74,6 +80,8 @@ class Item:
     # keys that hold a value: columns, `extra` keys and "field:<i>" for custom fields. Filled when loading, so the UI can
     # list what an item contains without decrypting it (light items have empty secret values).
     has: set = field(default_factory=set)
+    attachment_count: int = 0
+    attachments_to_add: list = field(default_factory=list, repr=False)     # [(name, bytes)] used by importers; not persisted by add_item
 
     def get(self, key: str):
         return getattr(self, key) if key in COLUMN_KEYS else self.extra.get(key, "")
@@ -178,7 +186,9 @@ class Vault:
             v._acquire_lock()
         if int(ver[0]) < SCHEMA_VERSION:
             try:
-                v._migrate_v1()
+                if int(ver[0]) < 2:
+                    v._migrate_v1()
+                v._upgrade_v3()
             except Exception:
                 v.close_quietly()
                 raise
@@ -282,6 +292,8 @@ class Vault:
                 self._load(r, [], full=True)
             for r in db.execute("SELECT item_id, snapshot FROM history"):
                 crypto.unseal(self._fk, self._aad(r["item_id"], "history"), crypto.b64d(r["snapshot"]))
+            for r in db.execute("SELECT id, item_id, data FROM attachments"):
+                crypto.unseal(self._fk, self._aad(r["item_id"], "attachment", r["id"]), bytes(r["data"]))
             return db.execute("SELECT COUNT(*) FROM items").fetchone()[0]
         finally:
             db.close()
@@ -405,7 +417,7 @@ class Vault:
                             "value": crypto.b64e(self._seal_str(iid, "fields", f.get("value", ""), f"field:{i}"))}
                            for i, f in enumerate(fields)])
 
-    def _load(self, r: sqlite3.Row, tags: list[str], full: bool) -> Item:
+    def _load(self, r: sqlite3.Row, tags: list[str], full: bool, acount: int = 0) -> Item:
         iid = r["id"]
         extra_raw, fields_raw = json.loads(r["extra"]), json.loads(r["fields"])
         has = {c for c in SEALED_COLUMNS if r[c]}
@@ -414,7 +426,7 @@ class Vault:
         it = Item(type=r["type"], name=r["name"], id=iid, folder_id=r["folder_id"], username=r["username"],
                   uris=json.loads(r["uris"]), tags=sorted(tags), favorite=bool(r["favorite"]), created=r["created"] or 0,
                   modified=r["modified"] or 0, pw_changed=r["pw_changed"] or 0, expires=r["expires"], deleted=r["deleted"],
-                  last_used=r["last_used"], has=has)
+                  last_used=r["last_used"], has=has, attachment_count=acount)
         if full:
             it.password, it.totp = self._open_str(iid, "password", r["password"]), self._open_str(iid, "totp", r["totp"])
             it.description = self._open_str(iid, "description", r["description"])
@@ -458,9 +470,20 @@ class Vault:
         for h in db.execute("SELECT id,item_id,snapshot FROM history").fetchall():
             db.execute("UPDATE history SET snapshot=? WHERE id=?",
                        (crypto.b64e(crypto.seal(self._fk, self._aad(h["item_id"], "history"), h["snapshot"].encode())), h["id"]))
-        db.execute("UPDATE meta SET value=? WHERE key='schema'", (str(SCHEMA_VERSION),))
+        db.execute("UPDATE meta SET value='2' WHERE key='schema'")
         db.commit()
         db.execute("VACUUM")                                    # drop the freed pages that still held the old plaintext
+        self._dirty = True
+        self.save(force=True)
+
+    def _upgrade_v3(self) -> None:
+        """v2 -> v3 only adds the attachments table. The old file is kept as *.pre-v3.bak."""
+        bak = self.path + ".pre-v3.bak"
+        if not os.path.exists(bak):
+            shutil.copy2(self.path, bak)
+        self.db.executescript(ATTACH_DDL)
+        self.db.execute("UPDATE meta SET value='3' WHERE key='schema'")
+        self.db.commit()
         self._dirty = True
         self.save(force=True)
 
@@ -493,7 +516,10 @@ class Vault:
     def get_item(self, iid: str, full: bool = True) -> Item | None:
         """full=True decrypts every secret (editing, export); full=False returns a light item (see `Item.has`)."""
         r = self.db.execute("SELECT * FROM items WHERE id=?", (iid,)).fetchone()
-        return self._load(r, self._tags(iid), full) if r else None
+        if not r:
+            return None
+        n = self.db.execute("SELECT COUNT(*) FROM attachments WHERE item_id=?", (iid,)).fetchone()[0]
+        return self._load(r, self._tags(iid), full, n)
 
     def reveal(self, iid: str, key: str) -> str:
         """Decrypts ONE secret value: a column (password/totp/description), an `extra` key, or 'field:<i>'."""
@@ -517,8 +543,9 @@ class Vault:
         tagmap: dict[str, list[str]] = {}
         for iid, tag in self.db.execute("SELECT item_id, tag FROM tags"):
             tagmap.setdefault(iid, []).append(tag)
+        counts = dict(self.db.execute("SELECT item_id, COUNT(*) FROM attachments GROUP BY item_id").fetchall())
         q = "SELECT * FROM items WHERE deleted IS NOT NULL" if trash else "SELECT * FROM items WHERE deleted IS NULL"
-        return [self._load(r, tagmap.get(r["id"], []), secrets) for r in self.db.execute(q + " ORDER BY name COLLATE NOCASE")]
+        return [self._load(r, tagmap.get(r["id"], []), secrets, counts.get(r["id"], 0)) for r in self.db.execute(q + " ORDER BY name COLLATE NOCASE")]
 
     def trash_item(self, iid: str) -> None:
         self.db.execute("UPDATE items SET deleted=? WHERE id=?", (time.time(), iid))
@@ -554,6 +581,32 @@ class Vault:
                  "data": json.loads(crypto.unseal(self._fk, self._aad(iid, "history"), crypto.b64d(r["snapshot"])))}
                 for r in self.db.execute("SELECT * FROM history WHERE item_id=? ORDER BY id DESC", (iid,))]
 
+    # ------------------------------------------------------------------ attachments
+    def add_attachment(self, item_id: str, name: str, data: bytes) -> str:
+        if len(data) > MAX_ATTACHMENT:
+            raise VaultError(f"attachment too large ({len(data) // (1 << 20)} MiB, limit {MAX_ATTACHMENT // (1 << 20)} MiB)")
+        if self.db.execute("SELECT 1 FROM items WHERE id=?", (item_id,)).fetchone() is None:
+            raise VaultError("item not found")
+        aid = new_id()
+        name = os.path.basename(name.replace("\\", "/")) or "file"
+        self.db.execute("INSERT INTO attachments VALUES(?,?,?,?,?,?)",
+                        (aid, item_id, name, len(data), time.time(), crypto.seal(self._fk, self._aad(item_id, "attachment", aid), data)))
+        self._changed()
+        return aid
+
+    def attachments(self, item_id: str) -> list[dict]:
+        return [dict(r) for r in self.db.execute("SELECT id,name,size,created FROM attachments WHERE item_id=? ORDER BY name COLLATE NOCASE", (item_id,))]
+
+    def get_attachment(self, att_id: str) -> tuple[str, bytes]:
+        r = self.db.execute("SELECT item_id,name,data FROM attachments WHERE id=?", (att_id,)).fetchone()
+        if r is None:
+            raise VaultError("attachment not found")
+        return r["name"], crypto.unseal(self._fk, self._aad(r["item_id"], "attachment", att_id), bytes(r["data"]))
+
+    def delete_attachment(self, att_id: str) -> None:
+        self.db.execute("DELETE FROM attachments WHERE id=?", (att_id,))
+        self._changed()
+
     def all_tags(self) -> list[str]:
         return [r[0] for r in self.db.execute("SELECT DISTINCT tag FROM tags ORDER BY tag COLLATE NOCASE")]
 
@@ -567,7 +620,9 @@ class Vault:
     def stats(self) -> dict:
         n = self.db.execute("SELECT COUNT(*) FROM items WHERE deleted IS NULL").fetchone()[0]
         t = self.db.execute("SELECT COUNT(*) FROM items WHERE deleted IS NOT NULL").fetchone()[0]
-        return {"items": n, "trash": t, "folders": self.db.execute("SELECT COUNT(*) FROM folders").fetchone()[0]}
+        a = self.db.execute("SELECT COUNT(*), COALESCE(SUM(size),0) FROM attachments").fetchone()
+        return {"items": n, "trash": t, "folders": self.db.execute("SELECT COUNT(*) FROM folders").fetchone()[0],
+                "attachments": a[0], "attachment_bytes": a[1]}
 
 
 def purge_old_backups(directory: str, stem: str, keep: int) -> None:

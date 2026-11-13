@@ -276,3 +276,54 @@ def test_main_window_offers_new_password_after_recovery_unlock(win, vpath, monke
     assert asked and "recovery key" in asked[0]
     win.vault.close()
     win.vault = None
+
+
+def test_item_dialog_attachments_roundtrip(win, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    f1 = tmp_path / "scan.pdf"
+    f1.write_bytes(b"PDF-DATA")
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"x" * (16 * 1024 * 1024 + 1))
+    d = ItemDialog(win.vault, win.qs, parent=win)
+    d.name.setText("Documents")
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(lambda *a, **k: ([str(f1), str(big)], "")))
+    d._add_att()
+    assert d.att.count() == 1 and "larger than" in d.err.text()              # the oversized file was refused
+    d._accept()
+    win.vault.add_item(d.item)
+    d.apply_attachments(win.vault, d.item.id)
+    (att,) = win.vault.attachments(d.item.id)
+    assert att["name"] == "scan.pdf" and win.vault.get_attachment(att["id"])[1] == b"PDF-DATA"
+    # edit: remove it and save another copy via "Save as…"
+    d2 = ItemDialog(win.vault, win.qs, win.vault.get_item(d.item.id), parent=win)
+    assert d2.att.count() == 1
+    out = tmp_path / "out.pdf"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "")))
+    d2.att.setCurrentRow(0)
+    d2._save_att()
+    assert out.read_bytes() == b"PDF-DATA" and oct(out.stat().st_mode & 0o777) == "0o600"
+    d2._remove_att()
+    d2._accept()
+    d2.apply_attachments(win.vault, d2.item.id)
+    assert win.vault.attachments(d.item.id) == []
+
+
+def test_detail_panel_lists_attachments_and_duplicate_copies_them(win, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
+    iid = win.vault.items()[0].id
+    win.vault.add_attachment(iid, "a.txt", b"AAA")
+    win.rebuild_sidebar()
+    win.search.clear()
+    for i in range(win.list.topLevelItemCount()):
+        if win.list.topLevelItem(i).data(0, Qt.UserRole) == iid:
+            win.list.setCurrentItem(win.list.topLevelItem(i))
+    from PySide6.QtWidgets import QLabel
+    assert any("a.txt" in l.text() for l in win.detail.scroll.widget().findChildren(QLabel))
+    out = tmp_path / "saved.txt"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (str(out), "")))
+    win.detail.saveAttachmentRequested.emit(win.vault.attachments(iid)[0]["id"], "a.txt")
+    assert out.read_bytes() == b"AAA"
+    win.duplicate_item()
+    copy = next(i for i in win.vault.items() if i.name.endswith("(copy)"))
+    (a,) = win.vault.attachments(copy.id)
+    assert win.vault.get_attachment(a["id"]) == ("a.txt", b"AAA")

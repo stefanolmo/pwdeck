@@ -135,6 +135,9 @@ def import_items(vault: Vault, items: list[Item], skip_duplicates: bool = True) 
                 skipped += 1
                 continue
             vault.add_item(it)
+            for name, data in it.attachments_to_add:
+                vault.add_attachment(it.id, name, data)
+            it.attachments_to_add = []
             added += 1
     return added, skipped
 
@@ -175,3 +178,11 @@ def write_private(path: str, text: str) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
         f.write(text)
+
+
+def write_private_bytes(path: str, data: bytes) -> None:
+    """Binary file (attachment) created with mode 0600."""
+    import os
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)

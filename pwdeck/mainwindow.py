@@ -17,7 +17,7 @@ from .sessionwatch import SessionWatcher
 from .startdialogs import UnlockDialog
 from .theme import icon
 from .itemtypes import TYPE_ORDER, type_label
-from .vault import Item, Vault, VaultChangedError, auto_backup, default_backup_dir
+from .vault import Item, Vault, VaultChangedError, VaultError, auto_backup, default_backup_dir
 from .widgets import SecureClipboard
 
 APP_NAME = "PW Deck"
@@ -105,6 +105,7 @@ class MainWindow(QMainWindow):
         self.detail.restoreRequested.connect(self.restore_item)
         self.detail.favoriteToggled.connect(self.toggle_favorite)
         self.detail.historyRequested.connect(self.show_history)
+        self.detail.saveAttachmentRequested.connect(self.save_attachment)
         split.addWidget(self.sidebar)
         split.addWidget(self.list)
         split.addWidget(self.detail)
@@ -313,6 +314,8 @@ class MainWindow(QMainWindow):
                 p, _ = QFileDialog.getSaveFileName(self, "Save a copy", "recovered.pwdeck", "PW Deck vault (*.pwdeck)")
                 if p:
                     self.vault.copy_to(p)
+        except VaultError as e:
+            QMessageBox.warning(self, "PW Deck", str(e))
         except OSError as e:
             QMessageBox.critical(self, "Cannot save", f"{e}\n\nYour changes are only in memory. Use Backup → Save a copy to keep them.")
 
@@ -451,7 +454,8 @@ class MainWindow(QMainWindow):
             return
         it = self.vault.get_item(cur.data(0, Qt.UserRole), full=False)
         iid = cur.data(0, Qt.UserRole)
-        self.detail.show_item(it, self.vault.folder_path(it.folder_id) if it else "", lambda key: self.vault.reveal(iid, key))
+        self.detail.show_item(it, self.vault.folder_path(it.folder_id) if it else "", lambda key: self.vault.reveal(iid, key),
+                              self.vault.attachments(iid))
 
     def current_item(self, full: bool = False) -> Item | None:
         """Light item by default (no secrets in memory); full=True only when editing/duplicating."""
@@ -517,6 +521,7 @@ class MainWindow(QMainWindow):
             d.tags.setText(val)
         if d.exec() == d.DialogCode.Accepted:
             self._do(self.vault.add_item, d.item)
+            self._do(d.apply_attachments, self.vault, d.item.id)
             self.rebuild_sidebar()
             self.refresh_list(d.item.id)
 
@@ -527,8 +532,10 @@ class MainWindow(QMainWindow):
         d = ItemDialog(self.vault, self.qs, it, parent=self)
         if d.exec() == d.DialogCode.Accepted:
             self._do(self.vault.update_item, d.item)
+            self._do(d.apply_attachments, self.vault, d.item.id)
             self.rebuild_sidebar()
             self.refresh_list(d.item.id)
+            self._list_changed(self.list.currentItem(), None)
 
     def duplicate_item(self) -> None:
         it = self.current_item(full=True)
@@ -538,6 +545,9 @@ class MainWindow(QMainWindow):
             c = copy.deepcopy(it)
             c.id, c.name, c.created = new_id(), it.name + " (copy)", 0.0
             self._do(self.vault.add_item, c)
+            for a in self.vault.attachments(it.id):
+                name, data = self.vault.get_attachment(a["id"])
+                self._do(self.vault.add_attachment, c.id, name, data)
             self.rebuild_sidebar()
             self.refresh_list(c.id)
 
@@ -579,6 +589,15 @@ class MainWindow(QMainWindow):
         if it:
             self._do(self.vault.move_item, it.id, fid)
             self.rebuild_sidebar()
+
+    def save_attachment(self, att_id: str, name: str) -> None:
+        p, _ = QFileDialog.getSaveFileName(self, "Save attachment", os.path.join(os.path.expanduser("~"), name))
+        if p:
+            try:
+                importers.write_private_bytes(p, self.vault.get_attachment(att_id)[1])
+                self.statusBar().showMessage(f"Saved {p} (file mode 600)", 6000)
+            except (OSError, VaultError) as e:
+                QMessageBox.critical(self, "Attachment", str(e))
 
     def show_history(self) -> None:
         it = self.current_item()

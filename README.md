@@ -29,7 +29,7 @@ Without installing: `pip install -r requirements.txt && python3 -m pwdeck`.
 | **Custom** | description + any number of custom fields |
 
 Every item can also have: **custom fields** (optionally hidden), **folders** (nested), **tags**, **favorite**, an **expiry date**,
-a 25-entry **history** of previous secrets, and goes to the **trash** before being deleted for good.
+**attachments** (files up to 16 MiB each, sealed individually like every secret), a 25-entry **history** of previous secrets, and goes to the **trash** before being deleted for good.
 
 ## Features
 
@@ -89,6 +89,8 @@ header: KDF (Argon2id or scrypt) params + salt, key slots {password, recovery} =
   and by the recovery key (HKDF). Changing the master password only rewrites the header.
 * With a keyfile, the password is first combined as `HMAC-SHA256(SHA256(keyfile), password)`. The master password is NFKC-normalised.
 * The whole file is authenticated: any modification is detected on open.
+* **Attachments** live inside the database, so the whole vault stays in RAM and is rewritten at every save: fine for documents and keys, not for videos (hard limit 16 MiB per file; a vault with hundreds of MB will feel slow). CSV/JSON exports do not include them; the recovery tool extracts them (`pwdeck_recover.py attachments vault.pwdeck -o DIR`).
+* **Upgrades leave a copy.** Opening a vault from an older version converts it and keeps the previous file as `<vault>.pre-v2.bak` / `.pre-v3.bak`; delete them when you are satisfied (they hold the old layout).
 * **Not SQLCipher.** The file is not a SQLCipher database: it is an authenticated container around a normal SQLite image. The trade-offs: no extra native
   dependency, one authenticated blob, but the whole database is loaded in RAM and rewritten on each save (fine for thousands of entries, not for gigabytes).
 * **What field sealing does and does not give you** (measured with `tests/test_memory.py`, which scans the memory of a real running process):
@@ -130,4 +132,4 @@ and its compatibility with the main code is covered by a test.
 ## Ideas not implemented yet
 
 Browser auto-fill extension (needs a local native-messaging bridge) · passphrase generator (needs a vetted word list) · KDBX import/export ·
-attachments · multiple vaults at once · QR scan for TOTP · hardware keys (FIDO2 hmac-secret / YubiKey) as a second factor · merge of divergent vault copies.
+multiple vaults at once · QR scan for TOTP · hardware keys (FIDO2 hmac-secret / YubiKey) as a second factor · merge of divergent vault copies.

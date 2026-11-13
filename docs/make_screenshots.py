@@ -31,7 +31,7 @@ def pump(s):
 
 s = SplashScreen(__version__)
 s.show()
-s.set_time(2550)
+s.set_time(2700)
 pm = QPixmap(s.size())
 pm.fill(QColor(0, 0, 0, 0))
 s.render(pm)

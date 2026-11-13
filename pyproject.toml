@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pwdeck"
+version = "0.1.0"
+description = "Local password manager with an encrypted single-file SQLite vault (Passbolt-like item types, no server)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["PySide6-Essentials>=6.5", "cryptography>=41"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+pwdeck = "pwdeck.__main__:main"
+pwdeck-recover = "pwdeck.recover:main"
+
+[tool.setuptools]
+packages = ["pwdeck"]
+
+[tool.setuptools.package-data]
+pwdeck = ["pwdeck.svg"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

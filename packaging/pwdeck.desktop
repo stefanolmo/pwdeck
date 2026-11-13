@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=PW Deck
+GenericName=Password manager
+GenericName[it]=Gestore di password
+Comment=Local password manager with an encrypted vault file
+Comment[it]=Gestore di password locale con vault cifrato su file
+Exec=@EXEC@ %f
+Icon=@ICON@
+Terminal=false
+Categories=Utility;Security;
+StartupWMClass=pwdeck

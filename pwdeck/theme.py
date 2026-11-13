@@ -113,9 +113,6 @@ QPushButton#ghost:hover {{ color: {TEXT}; background: {CARD_HI}; }}
 QMenuBar {{ background: {PANEL}; border-bottom: 1px solid {BORDER}; padding: 1px 4px; }}
 QMenuBar::item {{ padding: 5px 10px; border-radius: 5px; background: transparent; }}
 QMenuBar::item:selected {{ background: {CARD_HI}; }}
-QToolButton#winbtn {{ padding: 4px 9px; border-radius: 6px; background: transparent; border: 1px solid transparent; }}
-QToolButton#winbtn:hover {{ background: {CARD_HI}; border-color: {BORDER}; }}
-QToolButton#winclose:hover {{ background: #7a2a31; border-color: #8f3038; }}
 QToolBar QWidget#spacer {{ background: transparent; }}
 QToolButton#mini {{ padding: 3px 6px; border-radius: 6px; background: transparent; border: 1px solid transparent; }}
 QToolButton#mini:hover {{ background: {CARD_HI}; border-color: {BORDER}; }}

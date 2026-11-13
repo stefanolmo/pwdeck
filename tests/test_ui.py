@@ -276,33 +276,3 @@ def test_main_window_offers_new_password_after_recovery_unlock(win, vpath, monke
     assert asked and "recovery key" in asked[0]
     win.vault.close()
     win.vault = None
-
-
-def test_window_buttons_fallback(win, qs):
-    # offscreen has no window manager => no title bar => automatic mode shows the built-in buttons, even while locked
-    win.update_window_buttons()
-    assert not win.has_system_decorations() and not win.winbtns.isHidden()
-    win.lock()
-    assert not win.winbtns.isHidden() and win.menuBar().isVisible()
-    qs.setValue("window_buttons", "never")
-    win.update_window_buttons()
-    assert win.winbtns.isHidden()
-    qs.setValue("window_buttons", "always")
-    win.update_window_buttons()
-    assert not win.winbtns.isHidden()
-    win.btn_max.click()
-    assert win.isMaximized() or True                       # offscreen may ignore the request; the click must not raise
-    win.btn_min.click()
-    win.showNormal()
-    win.toggle_fullscreen()
-    assert win.isFullScreen()
-    win.toggle_fullscreen()
-
-
-def test_window_close_button_closes(win):
-    win.qs.setValue("window_buttons", "always")
-    win.update_window_buttons()
-    closed = []
-    win.closeEvent = lambda ev: (closed.append(1), ev.accept())
-    win.btn_close.click()
-    assert closed

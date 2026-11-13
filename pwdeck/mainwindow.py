@@ -188,51 +188,9 @@ class MainWindow(QMainWindow):
             a.setShortcut(QKeySequence(key))
             a.triggered.connect(lambda *_, s=slot: s())
             self.addAction(a)
-        # window buttons for desktops that draw no title bar (some Wayland sessions, X11 without a window manager)
-        self.winbtns = QWidget()
-        hl = QHBoxLayout(self.winbtns)
-        hl.setContentsMargins(0, 0, 2, 0)
-        hl.setSpacing(2)
-        self.btn_min, self.btn_max, self.btn_close = (self._winbtn(n, tip) for n, tip in
-                                                      (("minimize", "Minimize"), ("maximize", "Maximize / restore"), ("close", "Close")))
-        self.btn_close.setObjectName("winclose")
-        self.btn_min.clicked.connect(self.showMinimized)
-        self.btn_max.clicked.connect(self.toggle_maximize)
-        self.btn_close.clicked.connect(self.close)
-        for b in (self.btn_min, self.btn_max, self.btn_close):
-            hl.addWidget(b)
-        mb.setCornerWidget(self.winbtns, Qt.TopRightCorner)
-        self.winbtns.hide()
-
-    def _winbtn(self, name: str, tip: str):
-        from PySide6.QtWidgets import QToolButton
-        b = QToolButton()
-        b.setObjectName("winbtn")
-        b.setIcon(icon(name))
-        b.setIconSize(QSize(15, 15))
-        b.setToolTip(tip)
-        b.setFocusPolicy(Qt.NoFocus)
-        return b
-
-    def toggle_maximize(self) -> None:
-        self.showNormal() if self.isMaximized() else self.showMaximized()
 
     def toggle_fullscreen(self) -> None:
         self.showNormal() if self.isFullScreen() else self.showFullScreen()
-
-    def has_system_decorations(self) -> bool:
-        """True when a title bar surrounds the window (X11 window manager, or Qt's own Wayland decoration)."""
-        fg, g = self.frameGeometry(), self.geometry()
-        return fg.height() - g.height() > 8 or fg.width() - g.width() > 4
-
-    def update_window_buttons(self) -> None:
-        mode = str(self.qs.value("window_buttons", "auto"))
-        show = mode == "always" or (mode == "auto" and not self.has_system_decorations())
-        self.winbtns.setVisible(show and not self.isFullScreen())
-
-    def showEvent(self, ev) -> None:
-        super().showEvent(ev)
-        QTimer.singleShot(700, self.update_window_buttons)        # the frame size is only known once the window is mapped
 
     def about(self) -> None:
         QMessageBox.about(self, "About PW Deck", f"<b>PW Deck {__version__}</b><br>Local password manager, encrypted single-file vault.<br><br>"
@@ -704,7 +662,6 @@ class MainWindow(QMainWindow):
     def open_settings(self) -> None:
         if SettingsDialog(self.qs, self.vault, self).exec():
             self.clip.seconds = int(self.qs.value("clipboard_s", 30))
-            self.update_window_buttons()
 
     # -- backup / import / export
     def backup_menu_popup(self) -> None:

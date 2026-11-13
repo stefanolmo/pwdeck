@@ -630,11 +630,6 @@ class SettingsDialog(QDialog):
         self.clip = QSpinBox(minimum=0, maximum=600, value=int(qs.value("clipboard_s", 30)), suffix=" s")
         self.clip.setSpecialValueText("never")
         self.age = QSpinBox(minimum=30, maximum=3650, value=int(qs.value("audit/max_age_days", 365)), suffix=" days")
-        self.winbtn = QComboBox()
-        for label, val in (("Automatic (only if the desktop draws no title bar)", "auto"), ("Always", "always"), ("Never", "never")):
-            self.winbtn.addItem(label, val)
-        self.winbtn.setCurrentIndex(max(0, self.winbtn.findData(str(qs.value("window_buttons", "auto")))))
-        f.addRow("Window buttons", self.winbtn)
         f.addRow("Auto-lock after", self.autolock)
         f.addRow("", self.lock_min)
         f.addRow("", self.lock_susp)
@@ -694,7 +689,6 @@ class SettingsDialog(QDialog):
 
     def _save(self) -> None:
         q = self.qs
-        q.setValue("window_buttons", self.winbtn.currentData())
         q.setValue("autolock_min", self.autolock.value())
         q.setValue("lock_on_minimize", self.lock_min.isChecked())
         q.setValue("lock_on_suspend", self.lock_susp.isChecked())

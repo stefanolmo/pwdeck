@@ -44,8 +44,8 @@ Every item can also have: **custom fields** (optionally hidden), **folders** (ne
 | Search | all words must match across name, username, URL, tags, folder (descriptions and notes are sealed and therefore **not** searched) |
 | Audit | weak, reused, old, expired passwords; optional online breach check (Have I Been Pwned *k-anonymity*: only 5 hash chars leave the PC, on explicit click) |
 | Backup | verified copy, rotating **automatic backups** (keep last N), and an **Emergency kit** zip (vault + standalone recovery script + instructions) |
-| Import | generic CSV with auto-detected columns (Passbolt, KeePass, Bitwarden, LastPass, Chrome, 1Password… — see below), Bitwarden JSON, PW Deck JSON; duplicates skipped |
-| Export | CSV / JSON **in clear text** (mode 600, with a warning) — only for migrating away |
+| Import | **KeePass KDBX** (KeePass 2 / KeePassXC, with attachments, TOTP, tags, expiry, custom fields), generic CSV with auto-detected columns (Passbolt, KeePass, Bitwarden, LastPass, Chrome, 1Password… — see below), Bitwarden JSON, PW Deck JSON; duplicates skipped |
+| Export | **KDBX 4, encrypted** (own password + optional keyfile; readable by KeePassXC, KeePass 2, KeePassDX…) — the way out of this program, and the preferred export. CSV / JSON **in clear text** (mode 600, with a warning) only when a program needs them |
 | Safety nets | detects when the file was changed by another program (sync client, other PC) before overwriting; instance lock; tamper detection |
 
 Shortcuts: `Ctrl+N` new · `Ctrl+F` search · `Ctrl+U` copy username · `Ctrl+P` copy password · `Ctrl+T` copy TOTP · `Ctrl+E` edit · `Del` trash · `Ctrl+G` generator · `Ctrl+L` lock.
@@ -117,12 +117,20 @@ header: KDF (Argon2id or scrypt) params + salt, key slots {password, recovery} =
 The Italian list is a frequency list: it contains some proper nouns and foreign words, which does not lower the entropy (that depends only on the list size) but makes phrases less
 pleasant to read than the EFF list, which was hand-curated for passphrases. Details and licences: `pwdeck/wordlists/NOTICE.txt`.
 
+## KeePass (KDBX) import / export
+
+Needs the optional package `pykeepass` (`./install.sh` installs it; in an existing venv: `~/.local/share/pwdeck/venv/bin/pip install pykeepass`).
+Folders ↔ groups, TOTP ↔ the `otp` field (KeePassXC style; older `TOTP Seed/Settings` are read too), extra URLs ↔ `KP2A_URL…`, tags (a `favorite` tag marks favourites),
+expiry, custom fields (hidden ↔ *protected*), attachments ↔ binaries; card and SSH-key fields travel as `pwdeck.<field>` properties together with `PWDECK_TYPE`, so a
+round trip through KDBX restores the item type. The history and the trash are not exported; the Recycle Bin is not imported. Compatibility with KeePassXC /
+KeePass 2 is what `pykeepass` produces and is covered here only by round trips through `pykeepass` itself and by a hand-built KeePassXC-style file: open the first export in
+KeePassXC and check it before relying on it. The exported database uses `pykeepass`'s defaults (KDBX 4 with Argon2d), not PW Deck's Argon2id settings.
+
 ## Import notes
 
 CSV columns are matched by name (case-insensitive): `name/title`, `url/uri/login_uri`, `username/login/login_username`, `password/login_password`,
 `notes/description`, `folder/group/grouping`, `totp/login_totp`, `type`, `favorite`, `tags`. The format has only been tested with synthetic files
-modelled on KeePass/Bitwarden layouts, **not with real exports from every product**: check the result of your first import. KDBX (KeePass) and
-encrypted exports are not supported — export unencrypted CSV/JSON, import, then delete the export.
+modelled on KeePass/Bitwarden layouts, **not with real exports from every product**: check the result of your first import. Encrypted Bitwarden exports are not supported — export unencrypted JSON, import, then delete it.
 
 ## Development
 
@@ -137,5 +145,4 @@ and its compatibility with the main code is covered by a test.
 
 ## Ideas not implemented yet
 
-Browser auto-fill extension (needs a local native-messaging bridge) · KDBX import/export ·
-multiple vaults at once · QR scan for TOTP · hardware keys (FIDO2 hmac-secret / YubiKey) as a second factor · merge of divergent vault copies.
+Browser auto-fill extension (needs a local native-messaging bridge) · multiple vaults at once · QR scan for TOTP · hardware keys (FIDO2 hmac-secret / YubiKey) as a second factor · merge of divergent vault copies.

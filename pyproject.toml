@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pwdeck"
-version = "0.1.2"
+version = "0.2.0"
 description = "Local password manager with an encrypted single-file SQLite vault (Passbolt-like item types, no server)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,8 @@ license = { text = "MIT" }
 dependencies = ["PySide6-Essentials>=6.5", "cryptography>=46"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "pykeepass>=4.1"]
+kdbx = ["pykeepass>=4.1"]
 
 [project.scripts]
 pwdeck = "pwdeck.__main__:main"

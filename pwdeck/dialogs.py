@@ -819,6 +819,145 @@ class KdfDialog(QDialog):
         self.accept()
 
 
+# ------------------------------------------------------------------------------------------ KDBX
+def kdbx_missing_message() -> str:
+    import sys
+    return ("KDBX (KeePass) support needs the optional package <b>pykeepass</b>.<br><br>Install it with:<br>"
+            f"<tt>{sys.executable} -m pip install pykeepass</tt>")
+
+
+class KdbxImportDialog(QDialog):
+    """Asks the KDBX password (+ optional keyfile) and reads the file. Result in `.items` / `.warnings`."""
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        import os
+        self.path, self.keyfile = path, None
+        self.items: list[Item] = []
+        self.warnings: list[str] = []
+        self.setWindowTitle("Import KeePass database")
+        self.resize(470, 0)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(os.path.basename(path), objectName="h1"))
+        lay.addWidget(QLabel("Enter the password of this KDBX file (not your PW Deck master password).", objectName="muted", wordWrap=True))
+        self.pw = PasswordEdit()
+        self.pw.edit.returnPressed.connect(self._go)
+        lay.addWidget(self.pw)
+        self.kf_btn = QPushButton("Keyfile (optional)…")
+        self.kf_btn.setIcon(icon("key"))
+        self.kf_btn.clicked.connect(self._pick)
+        lay.addWidget(self.kf_btn)
+        self.err = QLabel("")
+        self.err.setWordWrap(True)
+        self.err.setStyleSheet(f"color:{theme.DANGER};")
+        lay.addWidget(self.err)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Read file")
+        bb.accepted.connect(self._go)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _pick(self) -> None:
+        import os
+        p, _ = QFileDialog.getOpenFileName(self, "Keyfile")
+        if p:
+            self.keyfile = p
+            self.kf_btn.setText(f"Keyfile: {os.path.basename(p)}")
+
+    def _go(self) -> None:
+        from . import kdbx
+        QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            self.items, self.warnings = kdbx.import_kdbx(self.path, self.pw.text(), self.keyfile)
+        except kdbx.KdbxUnavailable:
+            self.err.setText("pykeepass is not installed (pip install pykeepass).")
+            return
+        except ValueError as e:
+            self.err.setText(str(e))
+            return
+        finally:
+            QGuiApplication.restoreOverrideCursor()
+        self.accept()
+
+
+class KdbxExportDialog(QDialog):
+    """Chooses the target file and the password (+ optional keyfile) of the exported KDBX. Does the export on OK."""
+
+    def __init__(self, vault: Vault, parent=None):
+        super().__init__(parent)
+        import os
+        self.vault, self.keyfile, self.count = vault, None, 0
+        self.setWindowTitle("Export to KeePass (KDBX)")
+        self.resize(500, 0)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Export to KDBX", objectName="h1"))
+        lay.addWidget(QLabel("An encrypted KeePass 4 database, readable by KeePassXC, KeePass 2 and mobile apps. It gets its own password "
+                             "(choose a strong one; it is NOT your master password). History and the trash are not exported.",
+                             objectName="muted", wordWrap=True))
+        f = QFormLayout()
+        row = QHBoxLayout()
+        self.path = QLineEdit(os.path.join(os.path.expanduser("~"), "pwdeck-export.kdbx"))
+        b = QPushButton("…")
+        b.setFixedWidth(34)
+        b.clicked.connect(self._pick)
+        row.addWidget(self.path, 1)
+        row.addWidget(b)
+        f.addRow("File", row)
+        self.pw = PasswordEdit(strength=True)
+        self.pw2 = PasswordEdit()
+        f.addRow("Password", self.pw)
+        f.addRow("Repeat", self.pw2)
+        lay.addLayout(f)
+        self.kf_btn = QPushButton("Add a keyfile (optional)…")
+        self.kf_btn.setIcon(icon("key"))
+        self.kf_btn.clicked.connect(self._pick_kf)
+        lay.addWidget(self.kf_btn)
+        self.err = QLabel("")
+        self.err.setWordWrap(True)
+        self.err.setStyleSheet(f"color:{theme.DANGER};")
+        lay.addWidget(self.err)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Export")
+        bb.accepted.connect(self._go)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _pick(self) -> None:
+        p, _ = QFileDialog.getSaveFileName(self, "Export to KDBX", self.path.text(), "KeePass database (*.kdbx)")
+        if p:
+            self.path.setText(p if p.endswith(".kdbx") else p + ".kdbx")
+
+    def _pick_kf(self) -> None:
+        import os
+        p, _ = QFileDialog.getOpenFileName(self, "Existing keyfile (any file, or one made with KeePass)")
+        if p:
+            self.keyfile = p
+            self.kf_btn.setText(f"Keyfile: {os.path.basename(p)}")
+
+    def _go(self) -> None:
+        import os
+        from . import kdbx
+        if len(self.pw.text()) < 8:
+            self.err.setText("The password must be at least 8 characters.")
+        elif self.pw.text() != self.pw2.text():
+            self.err.setText("The two passwords differ.")
+        elif os.path.exists(self.path.text()):
+            self.err.setText("That file already exists: choose another name.")
+        else:
+            QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                self.count = kdbx.export_kdbx(self.vault, self.path.text(), self.pw.text(), self.keyfile)
+            except kdbx.KdbxUnavailable:
+                self.err.setText("pykeepass is not installed (pip install pykeepass).")
+                return
+            except Exception as e:      # noqa: BLE001
+                self.err.setText(str(e))
+                return
+            finally:
+                QGuiApplication.restoreOverrideCursor()
+            self.accept()
+
+
 # ------------------------------------------------------------------------------------------ settings
 class SettingsDialog(QDialog):
     def __init__(self, qs: QSettings, vault: Vault | None, parent=None):

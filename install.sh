@@ -13,6 +13,8 @@ echo "==> Virtual environment and package"
 python3 -m venv "$PREFIX/venv"
 "$PREFIX/venv/bin/pip" install --upgrade pip
 "$PREFIX/venv/bin/pip" install "$HERE"
+# optional: KeePass (KDBX) import/export. A failure here must not break the installation.
+"$PREFIX/venv/bin/pip" install "pykeepass>=4.1" || echo "   (optional) pykeepass could not be installed: KDBX import/export will be unavailable."
 
 echo "==> Launchers and icon"
 mkdir -p "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"

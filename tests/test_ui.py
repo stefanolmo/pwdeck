@@ -1,3 +1,4 @@
+import os
 import time
 
 import pytest
@@ -344,3 +345,62 @@ def test_generator_dialog_passphrase_mode_and_persistence(app, qs):
     assert d2.mode.currentData() == "words" and d2.words.value() == 7 and d2.sep.currentData() == "." and d2.lang.currentData() == "it"
     d2.mode.setCurrentIndex(d2.mode.findData("chars"))
     assert len(d2.password()) == d2.spin.value() and not d2.char_box.isHidden()
+
+
+def test_kdbx_export_and_import_dialogs(win, tmp_path, monkeypatch):
+    pytest.importorskip("pykeepass")
+    from pwdeck.dialogs import KdbxExportDialog, KdbxImportDialog
+    target = str(tmp_path / "e.kdbx")
+    d = KdbxExportDialog(win.vault)
+    d.path.setText(target)
+    d.pw.setText("short")
+    d._go()
+    assert "8 characters" in d.err.text() and d.result() == 0
+    d.pw.setText("export-password")
+    d.pw2.setText("different-one")
+    d._go()
+    assert "differ" in d.err.text()
+    d.pw2.setText("export-password")
+    d._go()
+    assert d.result() == 1 and d.count == 3 and os.path.exists(target)
+    d2 = KdbxExportDialog(win.vault)
+    d2.path.setText(target)
+    d2.pw.setText("export-password")
+    d2.pw2.setText("export-password")
+    d2._go()
+    assert "already exists" in d2.err.text()                         # never overwrites
+    imp = KdbxImportDialog(target)
+    imp.pw.setText("wrong")
+    imp._go()
+    assert "Wrong password" in imp.err.text() and imp.result() == 0
+    imp.pw.setText("export-password")
+    imp._go()
+    assert imp.result() == 1 and {i.name for i in imp.items} == {"GitHub", "Visa", "Wifi"}
+
+
+def test_main_window_import_kdbx_end_to_end(win, tmp_path, monkeypatch):
+    pytest.importorskip("pykeepass")
+    from PySide6.QtWidgets import QFileDialog
+    from pwdeck import kdbx as kd
+    from pwdeck.vault import Vault as V
+    src, _ = V.create(str(tmp_path / "src.pwdeck"), "pw", kdf="fast")
+    src.add_item(Item(name="From KeePass", username="kp", password="kp-pass"))
+    kd.export_kdbx(src, str(tmp_path / "in.kdbx"), "kdbx-pw")
+    src.close()
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(tmp_path / "in.kdbx"), "")))
+    from pwdeck import mainwindow
+    monkeypatch.setattr(mainwindow, "KdbxImportDialog", lambda path, parent: _FakeImport(path))
+    win.import_file()
+    assert any(i.name == "From KeePass" for i in win.vault.items())
+
+
+class _FakeImport:
+    """Stands in for the modal dialog: reads the file with the known password."""
+    DialogCode = type("DC", (), {"Accepted": 1})
+
+    def __init__(self, path):
+        from pwdeck import kdbx as kd
+        self.items, self.warnings = kd.import_kdbx(path, "kdbx-pw")
+
+    def exec(self):
+        return 1

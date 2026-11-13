@@ -10,9 +10,10 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QHBoxLayout, QInputDia
                                QMenu, QMessageBox, QPushButton, QSplitter, QStackedWidget, QToolBar, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from . import __version__, backup, importers, theme
+from . import __version__, backup, importers, kdbx, theme
 from .detail import TYPE_ICON, DetailPanel
-from .dialogs import AuditDialog, GeneratorDialog, HistoryDialog, ItemDialog, SettingsDialog, fmt_ts
+from .dialogs import (AuditDialog, GeneratorDialog, HistoryDialog, ItemDialog, KdbxExportDialog, KdbxImportDialog, SettingsDialog, fmt_ts,
+                      kdbx_missing_message)
 from .sessionwatch import SessionWatcher
 from .startdialogs import UnlockDialog
 from .theme import icon
@@ -725,16 +726,29 @@ class MainWindow(QMainWindow):
     def import_file(self) -> None:
         if not self.vault:
             return
-        p, _ = QFileDialog.getOpenFileName(self, "Import", "", "Password exports (*.csv *.json);;All files (*)")
+        p, _ = QFileDialog.getOpenFileName(self, "Import", "", "Password databases (*.kdbx *.csv *.json);;All files (*)")
         if not p:
             return
-        try:
-            items = importers.detect_and_parse(p)
-        except Exception as e:          # noqa: BLE001
-            QMessageBox.critical(self, "Import", f"Cannot import this file:\n{e}")
-            return
+        extra = ""
+        warnings: list[str] = []
+        if p.lower().endswith(".kdbx"):
+            if not kdbx.available():
+                QMessageBox.information(self, "KeePass import", kdbx_missing_message())
+                return
+            d = KdbxImportDialog(p, self)
+            if d.exec() != d.DialogCode.Accepted:
+                return
+            items, warnings = d.items, d.warnings
+            extra = "\n\n" + "\n".join(warnings) if warnings else ""
+        else:
+            try:
+                items = importers.detect_and_parse(p)
+            except Exception as e:          # noqa: BLE001
+                QMessageBox.critical(self, "Import", f"Cannot import this file:\n{e}")
+                return
+            extra = "\n\nRemember to delete the exported file afterwards: it is not encrypted."
         if QMessageBox.question(self, "Import", f"Found {len(items)} entries. Import them into this vault?\n"
-                                "(exact duplicates are skipped)\n\nRemember to delete the exported file afterwards: it is not encrypted.") != QMessageBox.Yes:
+                                f"(exact duplicates are skipped){extra}") != QMessageBox.Yes:
             return
         res = self._do(importers.import_items, self.vault, items)
         if res:
@@ -743,9 +757,21 @@ class MainWindow(QMainWindow):
 
     def export_menu_popup(self) -> None:
         m = QMenu(self)
+        m.addAction(icon("shield"), "Export to KeePass KDBX (encrypted)…", self.export_kdbx)
+        m.addSeparator()
         m.addAction("Export to CSV (plain text)…", lambda: self.export("csv"))
         m.addAction("Export to JSON (plain text)…", lambda: self.export("json"))
         m.exec(self.toolbar.mapToGlobal(self.toolbar.widgetForAction(self.act_export).geometry().bottomLeft()))
+
+    def export_kdbx(self) -> None:
+        if not self.vault:
+            return
+        if not kdbx.available():
+            QMessageBox.information(self, "KeePass export", kdbx_missing_message())
+            return
+        d = KdbxExportDialog(self.vault, self)
+        if d.exec() == d.DialogCode.Accepted:
+            QMessageBox.information(self, "KeePass export", f"Exported {d.count} items to\n{d.path.text()}\n\nKeep its password: it is separate from your master password.")
 
     def export(self, fmt: str) -> None:
         if not self.vault:

@@ -110,6 +110,12 @@ QLabel#h1 {{ font-size: 22px; font-weight: 800; }}
 QLabel#badge {{ color: {ACCENT}; background: rgba(45,212,191,38); border: 1px solid {ACCENT_DIM}; border-radius: 9px; padding: 1px 8px; font-size: 11px; font-weight: 700; }}
 QPushButton#ghost {{ background: transparent; border: none; padding: 4px 8px; color: {MUTED}; }}
 QPushButton#ghost:hover {{ color: {TEXT}; background: {CARD_HI}; }}
+QMenuBar {{ background: {PANEL}; border-bottom: 1px solid {BORDER}; padding: 1px 4px; }}
+QMenuBar::item {{ padding: 5px 10px; border-radius: 5px; background: transparent; }}
+QMenuBar::item:selected {{ background: {CARD_HI}; }}
+QToolButton#winbtn {{ padding: 4px 9px; border-radius: 6px; background: transparent; border: 1px solid transparent; }}
+QToolButton#winbtn:hover {{ background: {CARD_HI}; border-color: {BORDER}; }}
+QToolButton#winclose:hover {{ background: #7a2a31; border-color: #8f3038; }}
 QToolBar QWidget#spacer {{ background: transparent; }}
 QToolButton#mini {{ padding: 3px 6px; border-radius: 6px; background: transparent; border: 1px solid transparent; }}
 QToolButton#mini:hover {{ background: {CARD_HI}; border-color: {BORDER}; }}
@@ -191,11 +197,15 @@ def _warn(p, c): _poly(p, [(12, 4), (21, 19.5), (3, 19.5)], True); _poly(p, [(12
 def _check(p, c): _poly(p, [(4, 12.5), (9.5, 18), (20, 6)])
 def _open(p, c): _poly(p, [(3, 7), (3, 19), (19, 19), (21, 11), (8, 11), (6, 19)]); _poly(p, [(3, 7), (9, 7), (11, 9), (18, 9), (18, 11)])
 def _link(p, c): _poly(p, [(10, 14), (14, 10)]); _poly(p, [(11, 7), (13, 5), (19, 11), (17, 13)]); _poly(p, [(13, 17), (11, 19), (5, 13), (7, 11)])
+def _minimize(p, c): _poly(p, [(6, 17), (18, 17)])
+def _maximize(p, c): _rr(p, 5.5, 5.5, 13, 13, 2)
+def _restore(p, c): _rr(p, 5.5, 8.5, 10, 10, 2); _poly(p, [(9, 8.5), (9, 5.5), (18.5, 5.5), (18.5, 15), (15.5, 15)])
+def _close(p, c): _poly(p, [(6, 6), (18, 18)]); _poly(p, [(18, 6), (6, 18)])
 def _lockfill(p, c): _lock(p, c)
 
 
 _NAMES = ("lock unlock key plus trash star starfill folder copy eye eyeoff edit search shield backup restore dice globe note "
-          "card clock tag gear import export history terminal grid warn check open link").split()
+          "card clock tag gear import export history terminal grid warn check open link minimize maximize close").split()
 _FUNCS = {n: globals()["_" + n] for n in _NAMES}
 
 

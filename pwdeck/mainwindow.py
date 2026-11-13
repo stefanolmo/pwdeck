@@ -203,6 +203,17 @@ class MainWindow(QMainWindow):
         self.search.clear()
         self.rebuild_sidebar()
         self._maybe_backup()
+        if v.via_recovery:
+            QTimer.singleShot(0, self._offer_new_password)
+
+    def _offer_new_password(self) -> None:
+        if self.vault and self.vault.via_recovery and QMessageBox.question(
+                self, "Recovery key", "You unlocked the vault with the recovery key.\nSet a new master password now?") == QMessageBox.Yes:
+            from .dialogs import ChangePasswordDialog
+            d = ChangePasswordDialog(self.vault, self)
+            if d.exec() == d.DialogCode.Accepted:
+                self._do(d.apply)
+                self.statusBar().showMessage("Master password changed; the recovery key is still valid.", 8000)
 
     def lock(self) -> None:
         if not self.vault:

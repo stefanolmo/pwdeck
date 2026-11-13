@@ -232,3 +232,47 @@ def test_imports_need_only_declared_dependencies():
             "import pwdeck.__main__, pwdeck.recover, pwdeck.backup, pwdeck.audit\n")
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env={**__import__('os').environ, "QT_QPA_PLATFORM": "offscreen"})
     assert r.returncode == 0, r.stderr
+
+
+def test_recovery_session_can_set_new_password_without_the_old_one(app, qs, tmp_path, monkeypatch):
+    from pwdeck.dialogs import ChangePasswordDialog
+    path = str(tmp_path / "r.pwdeck")
+    v, rk = Vault.create(path, "forgotten", kdf="fast")
+    v.close()
+    v = Vault.open(path, recovery_key=rk)
+    assert v.via_recovery
+    d = ChangePasswordDialog(v)
+    assert d.cur.isHidden()
+    d.new.setText("brand new pass")
+    d.new2.setText("brand new pass")
+    d._ok()
+    assert d.result() == 1                                   # accepted with NO current password
+    d.apply()
+    assert not v.via_recovery
+    v.close()
+    Vault.open(path, "brand new pass").close()
+    Vault.open(path, recovery_key=rk).close()                # recovery key still valid
+    # a normal session still has to prove the current password
+    v = Vault.open(path, "brand new pass")
+    d2 = ChangePasswordDialog(v)
+    assert not d2.cur.isHidden()
+    d2.new.setText("another pass 1")
+    d2.new2.setText("another pass 1")
+    d2.cur.setText("wrong")
+    d2._ok()
+    assert d2.result() == 0 and "current" in d2.err.text()
+    v.close()
+
+
+def test_main_window_offers_new_password_after_recovery_unlock(win, vpath, monkeypatch):
+    rk = win.vault.recovery                                  # set by the `vault` fixture
+    win.lock()
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(lambda *a, **k: (asked.append(a[2]), QMessageBox.No)[1]))
+    win.set_vault(Vault.open(vpath, recovery_key=rk))
+    t0 = time.time()
+    while not asked and time.time() - t0 < 2:
+        QApplication.instance().processEvents()
+    assert asked and "recovery key" in asked[0]
+    win.vault.close()
+    win.vault = None

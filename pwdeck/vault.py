@@ -129,6 +129,7 @@ class Vault:
         self._vid: str | None = None
         self.db.execute("PRAGMA secure_delete=ON")        # overwrite deleted/updated content inside the in-memory image
         self._header = header
+        self.via_recovery = False       # True when unlocked with the recovery key: the old password is then unknown by definition
         self._batch = 0
         self._dirty = False
         self._stat = None
@@ -171,6 +172,7 @@ class Vault:
         if ver is None or int(ver[0]) > SCHEMA_VERSION:
             raise VaultError("this vault was created by a newer version of PW Deck")
         v = cls(path, db, dek, header)
+        v.via_recovery = bool(recovery_key)
         v._stat = st
         if lock:
             v._acquire_lock()
@@ -289,6 +291,7 @@ class Vault:
         self._header = crypto.rewrap_password(self._header, self._dek, new_password, keyfile, kdf)
         self._dirty = True
         self.save()
+        self.via_recovery = False
 
     def new_recovery_key(self) -> str:
         self._header, key = crypto.new_recovery_slot(self._header, self._dek)

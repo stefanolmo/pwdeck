@@ -532,12 +532,17 @@ class ChangePasswordDialog(QDialog):
         self.new = PasswordEdit(strength=True)
         self.new2 = PasswordEdit()
         f.addRow("Current password", self.cur)
+        if vault.via_recovery:        # unlocked with the recovery key: the old password is exactly what was lost
+            self.cur.hide()
+            f.labelForField(self.cur).hide()
+            lay.insertWidget(0, QLabel("You unlocked the vault with the recovery key.\nChoose a new master password; the recovery key stays valid.",
+                                       wordWrap=True))
         f.addRow("New password", self.new)
         f.addRow("Repeat", self.new2)
         lay.addLayout(f)
         self.kf_info = QLabel("")
         self.cur_kf = None
-        if vault.uses_keyfile:
+        if vault.uses_keyfile and not vault.via_recovery:
             b = QPushButton("Select the current keyfile…")
             b.clicked.connect(self._pick_cur_kf)
             lay.addWidget(b)
@@ -567,7 +572,7 @@ class ChangePasswordDialog(QDialog):
             self.kf_info.setText("Keyfile ready. Keep a copy somewhere safe: without it the vault cannot be opened.")
 
     def _ok(self) -> None:
-        if not self.vault.verify_password(self.cur.text(), self.cur_kf):
+        if not self.vault.via_recovery and not self.vault.verify_password(self.cur.text(), self.cur_kf):
             self.err.setText("The current password (or keyfile) is wrong.")
         elif len(self.new.text()) < 8:
             self.err.setText("The new password must be at least 8 characters.")

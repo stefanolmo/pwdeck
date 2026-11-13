@@ -139,43 +139,72 @@ class SplashScreen(QWidget):
             p.setPen(QPen(col(pts[i].y()), 3.0, Qt.SolidLine, Qt.RoundCap))
             p.drawLine(pts[i - 1], pts[i])
 
-        # 2) the dial turns: one full turn, a little back, then it settles
+        # 2) what makes it a safe and not a clock: the door, two hinges, a spoked handle next to the combination dial, feet
         fade = _ease((k - 0.25) / 0.12)
         if fade <= 0:
             return
-        done = _ease((k - 0.82) / 0.10)                         # 3) click: the dial lights up
-        angle = 360 * _ease((k - 0.30) / 0.38) - 50 * _ease((k - 0.68) / 0.10)
-        c, r = box.center(), 50.0
+        done = _ease((k - 0.82) / 0.10)                         # 4) click: everything lights up
+        accent = QColor(theme.ACCENT)
+        edge = accent if done > 0.5 else QColor(255, 255, 255, 150)
+        p.setOpacity(p.opacity() * fade)
+        door = box.adjusted(16, 16, -16, -16)
+        p.setPen(QPen(QColor(255, 255, 255, 70), 1.8))
+        p.setBrush(Qt.NoBrush)
+        p.drawRoundedRect(door, 12, 12)
+        p.setBrush(QColor(14, 19, 25))
+        for hy in (door.top() + 34, door.bottom() - 34):        # hinges
+            p.drawRoundedRect(QRectF(door.left() - 5, hy - 11, 10, 22), 3, 3)
+        for fx in (box.left() + 22, box.right() - 44):          # feet
+            p.drawRoundedRect(QRectF(fx, box.bottom() + 3, 22, 8), 3, 3)
+        cy = box.center().y()
+        # 3) the dial turns one full turn, a little back, and settles under the fixed index mark
+        dial = QPointF(door.left() + 54, cy)
+        r = 36.0
+        angle = 360 * _ease((k - 0.30) / 0.38) - 40 * _ease((k - 0.68) / 0.10)
         if done > 0:
-            glow = QRadialGradient(c, r * 1.9)
-            glow.setColorAt(0, QColor(45, 212, 191, int(110 * done)))
+            glow = QRadialGradient(dial, r * 1.9)
+            glow.setColorAt(0, QColor(45, 212, 191, int(100 * done)))
             glow.setColorAt(1, QColor(45, 212, 191, 0))
             p.setPen(Qt.NoPen)
             p.setBrush(QBrush(glow))
-            p.drawEllipse(c, r * 1.9, r * 1.9)
-        p.setOpacity(p.opacity() * fade)
-        p.setPen(QPen(QColor(255, 255, 255, 55), 1.6))          # the door's inner edge: the one line that says "safe"
+            p.drawEllipse(dial, r * 1.9, r * 1.9)
+        p.setPen(QPen(edge, 2.4))
         p.setBrush(Qt.NoBrush)
-        p.drawRoundedRect(box.adjusted(16, 16, -16, -16), 12, 12)
-        ring = QColor(theme.ACCENT) if done > 0.5 else QColor(255, 255, 255, 150)
-        p.setPen(QPen(ring, 2.4))
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(c, r, r)
+        p.drawEllipse(dial, r, r)
         p.save()
-        p.translate(c)
+        p.translate(dial)
         p.rotate(angle)
-        p.setPen(QPen(QColor(255, 255, 255, 170), 2.2, Qt.SolidLine, Qt.RoundCap))
-        for i in range(12):
+        p.setPen(QPen(QColor(255, 255, 255, 170), 1.8, Qt.SolidLine, Qt.RoundCap))
+        for i in range(20):
             p.save()
-            p.rotate(i * 30)
-            p.drawLine(QPointF(0, -r + 6), QPointF(0, -r + 15))
+            p.rotate(i * 18)
+            p.drawLine(QPointF(0, -r + 5), QPointF(0, -r + (14 if i % 5 == 0 else 9)))
             p.restore()
-        p.setPen(QPen(QColor(theme.ACCENT), 4, Qt.SolidLine, Qt.RoundCap))
-        p.drawLine(QPointF(0, -6), QPointF(0, -r + 22))          # the pointer turns with the dial
+        p.setPen(QPen(edge, 2.0))
+        p.setBrush(QColor(22, 31, 41))
+        p.drawEllipse(QPointF(0, 0), 15, 15)                     # knob
+        p.setPen(Qt.NoPen)
+        p.setBrush(accent)
+        p.drawEllipse(QPointF(0, -8), 2.6, 2.6)                  # a dot on the knob, not a hand
         p.restore()
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(theme.ACCENT) if done > 0.5 else QColor("#e5e7eb"))
-        p.drawEllipse(c, 7, 7)
+        p.setBrush(accent)
+        p.drawPolygon([QPointF(dial.x() - 6, dial.y() - r - 12), QPointF(dial.x() + 6, dial.y() - r - 12), QPointF(dial.x(), dial.y() - r - 2)])
+        # handle: three spokes, turns at the click
+        hc = QPointF(door.right() - 31, cy)
+        p.save()
+        p.translate(hc)
+        p.rotate(60 * done)
+        p.setPen(QPen(accent if done > 0.5 else QColor("#e5e7eb"), 4.5, Qt.SolidLine, Qt.RoundCap))
+        for th in (0, 120, 240):
+            p.save()
+            p.rotate(th)
+            p.drawLine(QPointF(0, 0), QPointF(0, -26))
+            p.restore()
+        p.setPen(QPen(QColor("#04211d"), 2))
+        p.setBrush(accent if done > 0.5 else QColor("#e5e7eb"))
+        p.drawEllipse(QPointF(0, 0), 8, 8)
+        p.restore()
         p.setOpacity(1.0)
 
     def _text(self, p: QPainter) -> None:

@@ -7,7 +7,7 @@ import io
 import json
 import time
 
-from .types import TYPES
+from .itemtypes import TYPES
 from .vault import Item, Vault
 
 _COLS = {

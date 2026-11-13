@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone emergency tool for PW Deck vaults. Needs ONLY Python >= 3.11 and the `cryptography` package
+"""Standalone emergency tool for PW Deck vaults. Needs ONLY Python >= 3.11 and the `cryptography` package (>= 46 for Argon2id)
 (`pip install cryptography`); it does not import anything else from PW Deck, so you can copy this single file
 next to a backup and use it on any machine, with no GUI.
 
@@ -51,8 +51,12 @@ def unlock(header, password, keyfile, recovery):
             if keyfile is None:
                 sys.exit("this vault needs a keyfile (--keyfile FILE)")
             pw = hmac.new(hashlib.sha256(keyfile).digest(), pw, hashlib.sha256).digest()
-        n = 1 << k["log_n"]
-        kek = hashlib.scrypt(pw, salt=b64(k["salt"]), n=n, r=k["r"], p=k["p"], maxmem=128 * n * k["r"] * 2 + (8 << 20), dklen=32)
+        if k.get("alg") == "argon2id":
+            from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
+            kek = Argon2id(salt=b64(k["salt"]), length=32, iterations=k["t"], lanes=k["p"], memory_cost=k["m"]).derive(pw)
+        else:
+            n = 1 << k["log_n"]
+            kek = hashlib.scrypt(pw, salt=b64(k["salt"]), n=n, r=k["r"], p=k["p"], maxmem=128 * n * k["r"] * 2 + (8 << 20), dklen=32)
         slot, name = header["slots"]["password"], "password"
     try:
         return AESGCM(kek).decrypt(b64(slot["nonce"]), b64(slot["ct"]), b"pwdeck-slot-" + name.encode())
@@ -107,7 +111,8 @@ def main():
     header, ct = parse(blob)
     if a.command == "info":
         k = header["kdf"]
-        print(f"PW Deck vault, format v{header['v']}, scrypt N=2^{k['log_n']} r={k['r']} p={k['p']}, "
+        kd = f"Argon2id m={k['m']}KiB t={k['t']} p={k['p']}" if k.get("alg") == "argon2id" else f"scrypt N=2^{k['log_n']} r={k['r']} p={k['p']}"
+        print(f"PW Deck vault, format v{header['v']}, {kd}, "
               f"keyfile: {'yes' if k.get('keyfile') else 'no'}, recovery key: {'yes' if 'recovery' in header['slots'] else 'no'}, "
               f"size: {len(blob)} bytes")
         return

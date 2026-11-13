@@ -16,7 +16,7 @@ from .dialogs import AuditDialog, GeneratorDialog, HistoryDialog, ItemDialog, Se
 from .sessionwatch import SessionWatcher
 from .startdialogs import UnlockDialog
 from .theme import icon
-from .types import TYPE_ORDER, type_label
+from .itemtypes import TYPE_ORDER, type_label
 from .vault import Item, Vault, VaultChangedError, auto_backup, default_backup_dir
 from .widgets import SecureClipboard
 

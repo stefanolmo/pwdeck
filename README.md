@@ -3,7 +3,7 @@
 Local **password manager** with the same dark look as [CNC Deck](https://github.com/stefanolmo/cncgrbl): no server, no cloud, no account.
 Everything lives in **one encrypted file** (`.pwdeck`) that contains an **SQLite** database. Copy the file to back it up or to move
 it to another computer.
-Python 3.11+ · Qt6 (PySide6) · `cryptography`. Tested on Ubuntu 24.04.
+Python 3.11+ · Qt6 (PySide6) · `cryptography` ≥ 46 (Argon2id). Tested on Ubuntu 24.04.
 
 <p align="center"><img src="docs/splash.png" alt="PW Deck - splash screen" width="640"></p>
 <p align="center"><img src="docs/main.png" alt="PW Deck - main window" width="900"></p>
@@ -35,7 +35,7 @@ a 25-entry **history** of previous secrets, and goes to the **trash** before bei
 
 | | |
 |---|---|
-| Vault | single file, AES-256-GCM, scrypt key derivation, atomic writes (temp file + fsync + rename), a write after every change |
+| Vault | single file, AES-256-GCM, **Argon2id** key derivation (older vaults: scrypt, upgradeable in Settings → Key derivation), atomic writes (temp file + fsync + rename), a write after every change |
 | Unlock | master password **+ optional keyfile** (second factor) **+ recovery key** (printed once at creation) |
 | Generator | CSPRNG, length 8–128, character classes, no look-alikes, guaranteed one char per class, strength meter |
 | Clipboard | auto-clear after N seconds (only if it still holds *your* value), asks clipboard managers (KDE/Klipper) not to record it |
@@ -76,7 +76,7 @@ Restoring on a new machine:
 
 ```
 "PWDECK\0\1" | u32 header length | JSON header | AES-256-GCM(DEK, nonce, sqlite bytes, aad=magic)
-header: scrypt params + salt, key slots {password, recovery} = AES-GCM-wrapped DEK, payload nonce
+header: KDF (Argon2id or scrypt) params + salt, key slots {password, recovery} = AES-GCM-wrapped DEK, payload nonce
 ```
 
 * The SQLite database is only ever in memory (`Connection.serialize()`) or encrypted; no plain temp file is written.
@@ -85,7 +85,7 @@ header: scrypt params + salt, key slots {password, recovery} = AES-GCM-wrapped D
   folders and tags stay readable so the list and the search work. The database that sits in RAM while the vault is unlocked therefore holds **no plaintext
   secrets**: a value is decrypted only when you reveal it, copy it, edit the item or run the audit/export. Old v1 vaults are migrated on first open
   (a copy of the old file is kept as `<vault>.pre-v2.bak`; delete it once you are happy, it still contains the old layout).
-* A random 256-bit **data key** encrypts the content and is stored wrapped by a key derived from the password (scrypt N=2¹⁷, r=8: 128 MiB; "High": 256 MiB),
+* A random 256-bit **data key** encrypts the content and is stored wrapped by a key derived from the password (Argon2id, 256 MiB, 3 passes, 4 lanes; "High": 512 MiB, 4 passes),
   and by the recovery key (HKDF). Changing the master password only rewrites the header.
 * With a keyfile, the password is first combined as `HMAC-SHA256(SHA256(keyfile), password)`. The master password is NFKC-normalised.
 * The whole file is authenticated: any modification is detected on open.

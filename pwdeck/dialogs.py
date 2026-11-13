@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QDialog, QDialog
 
 from . import audit, generator, theme, totp
 from .theme import icon
-from .types import TYPE_ORDER, TYPES, type_fields, type_label
+from .itemtypes import TYPE_ORDER, TYPES, type_fields, type_label
 from .vault import Item, Vault
 from .widgets import PasswordEdit, StrengthBar, mini_button
 
@@ -612,6 +612,57 @@ def pick_or_create_keyfile(parent) -> bytes | None:
     return None
 
 
+class KdfDialog(QDialog):
+    """Shows the vault's key derivation and re-derives the password slot with a stronger setting (e.g. scrypt -> Argon2id)."""
+
+    def __init__(self, vault: Vault, parent=None):
+        super().__init__(parent)
+        self.vault = vault
+        self.cur_kf: bytes | None = None
+        self.setWindowTitle("Key derivation")
+        self.resize(480, 0)
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(f"Current: <b>{vault.kdf_info}</b>", wordWrap=True))
+        lay.addWidget(QLabel("Re-deriving the key needs your master password. The vault content is not re-encrypted; the recovery key stays valid.",
+                             objectName="muted", wordWrap=True))
+        f = QFormLayout()
+        self.combo = QComboBox()
+        self.combo.addItem("Standard — Argon2id, 256 MiB", "standard")
+        self.combo.addItem("High — Argon2id, 512 MiB", "high")
+        f.addRow("New setting", self.combo)
+        self.pw = PasswordEdit()
+        f.addRow("Master password", self.pw)
+        lay.addLayout(f)
+        if vault.uses_keyfile:
+            b = QPushButton("Select the keyfile…")
+            b.setIcon(icon("key"))
+            b.clicked.connect(self._pick)
+            lay.addWidget(b)
+        self.err = QLabel("")
+        self.err.setStyleSheet(f"color:{theme.DANGER};")
+        lay.addWidget(self.err)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def _pick(self) -> None:
+        p, _ = QFileDialog.getOpenFileName(self, "Keyfile")
+        if p:
+            self.cur_kf = open(p, "rb").read()
+
+    def _ok(self) -> None:
+        if not self.vault.verify_password(self.pw.text(), self.cur_kf):
+            self.err.setText("Wrong password (or keyfile).")
+            return
+        try:
+            self.vault.change_password(self.pw.text(), self.cur_kf, self.combo.currentData())
+        except Exception as e:      # noqa: BLE001
+            self.err.setText(str(e))
+            return
+        self.accept()
+
+
 # ------------------------------------------------------------------------------------------ settings
 class SettingsDialog(QDialog):
     def __init__(self, qs: QSettings, vault: Vault | None, parent=None):
@@ -661,12 +712,16 @@ class SettingsDialog(QDialog):
             b1 = QPushButton("Change master password…")
             b1.setIcon(icon("key"))
             b1.clicked.connect(self._chpw)
+            b3 = QPushButton("Key derivation…" + ("  (upgrade available)" if vault.kdf_is_legacy else ""))
+            b3.setIcon(icon("gear"))
+            b3.clicked.connect(self._kdf)
             b2 = QPushButton("New recovery key…")
             b2.setIcon(icon("shield"))
             b2.clicked.connect(self._newrk)
             row.addWidget(b1)
             row.addWidget(b2)
             lay.addLayout(row)
+            lay.addWidget(b3)
         bb = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         bb.accepted.connect(self._save)
         bb.rejected.connect(self.reject)
@@ -682,6 +737,11 @@ class SettingsDialog(QDialog):
         if d.exec() == QDialog.Accepted:
             d.apply()
             QMessageBox.information(self, "Master password", "Master password changed. The recovery key is still valid.")
+
+    def _kdf(self) -> None:
+        d = KdfDialog(self.vault, self)
+        if d.exec() == QDialog.Accepted:
+            QMessageBox.information(self, "Key derivation", f"Done. Now: {self.vault.kdf_info}")
 
     def _newrk(self) -> None:
         if QMessageBox.question(self, "New recovery key", "The old recovery key will stop working. Continue?") == QMessageBox.Yes:

@@ -9,7 +9,7 @@ File layout (all integers big-endian)::
 
 * The database is a normal SQLite file, but it only ever exists in memory (`sqlite3.Connection.serialize`) or encrypted.
 * DEK = random 256-bit data key. It is stored *wrapped* (AES-GCM) in one or more key slots:
-    - ``password``: KEK = scrypt(NFKC(master password) [+ keyfile], salt)
+    - ``password``: KEK = Argon2id (default) or scrypt (vaults created by 0.1.x) of NFKC(master password) [+ keyfile], with a random salt
     - ``recovery``: KEK = HKDF-SHA256(recovery key), the recovery key is a random 160-bit code shown once at creation
   so changing the master password only rewrites the header and the vault can be opened with either slot.
 * A keyfile (optional) is mixed into the password: ``HMAC-SHA256(key=SHA256(keyfile), msg=password)``.
@@ -25,19 +25,25 @@ import secrets
 import struct
 import unicodedata
 
-from cryptography.exceptions import InvalidTag
+from cryptography.exceptions import InvalidTag, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.argon2 import Argon2id
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 MAGIC = b"PWDECK\x00\x01"
-KDF_PRESETS = {                       # name: (log2 N, r, p)  scrypt memory = 128 * N * r bytes
-    "standard": (17, 8, 1),           # 128 MiB, ~0.3-0.6 s
-    "high": (18, 8, 1),               # 256 MiB, ~1 s
-    "fast": (14, 8, 1),               # 16 MiB — tests / very slow machines only
+KDF_PRESETS = {
+    # Argon2id: m = memory in KiB, t = passes, p = lanes
+    "standard": {"alg": "argon2id", "m": 262144, "t": 3, "p": 4},      # 256 MiB, ~0.4-1 s
+    "high": {"alg": "argon2id", "m": 524288, "t": 4, "p": 4},          # 512 MiB, ~1-2 s
+    "fast": {"alg": "argon2id", "m": 8192, "t": 1, "p": 1},            # tests / very slow machines only
+    # legacy scrypt (what 0.1.x created); kept so old vaults can be created in tests and still be opened
+    "scrypt-standard": {"alg": "scrypt", "log_n": 17, "r": 8, "p": 1},
+    "scrypt-fast": {"alg": "scrypt", "log_n": 14, "r": 8, "p": 1},
 }
 DEFAULT_KDF = "standard"
 _MAX_LOG_N = 22
+_MAX_ARGON_KIB = 1 << 21        # 2 GiB: a damaged/hostile header must not be able to make us allocate more
 
 
 class VaultError(Exception):
@@ -81,11 +87,29 @@ def _kek_from_password(password: str, kdf: dict, keyfile: bytes | None) -> bytes
         pw = hmac.new(keyfile_digest(keyfile), pw, hashlib.sha256).digest()
     elif keyfile is not None:
         raise WrongPasswordError("this vault does not use a keyfile")
+    alg = kdf.get("alg")
+    if alg == "argon2id":
+        m, t, p = kdf["m"], kdf["t"], kdf["p"]
+        if not (1 <= p <= 16 and 8 * p <= m <= _MAX_ARGON_KIB and 1 <= t <= 64):
+            raise CorruptVaultError("implausible KDF parameters")
+        try:
+            return Argon2id(salt=b64d(kdf["salt"]), length=32, iterations=t, lanes=p, memory_cost=m).derive(pw)
+        except UnsupportedAlgorithm as e:
+            raise VaultError("this vault uses Argon2id, which this system's OpenSSL does not provide "
+                             "(install a recent `cryptography` wheel)") from e
+    if alg != "scrypt":
+        raise CorruptVaultError(f"unknown key derivation {alg!r}")
     log_n, r, p = kdf["log_n"], kdf["r"], kdf["p"]
     if not (10 <= log_n <= _MAX_LOG_N and 1 <= r <= 32 and 1 <= p <= 16):
         raise CorruptVaultError("implausible KDF parameters")
     n = 1 << log_n
     return hashlib.scrypt(pw, salt=b64d(kdf["salt"]), n=n, r=r, p=p, maxmem=128 * n * r * 2 + (8 << 20), dklen=32)
+
+
+def kdf_description(kdf: dict) -> str:
+    if kdf.get("alg") == "argon2id":
+        return f"Argon2id, {kdf['m'] // 1024} MiB, {kdf['t']} passes, {kdf['p']} lanes"
+    return f"scrypt, {128 * (1 << kdf['log_n']) * kdf['r'] // (1 << 20)} MiB (older, still secure; upgrade recommended)"
 
 
 def new_recovery_key() -> str:
@@ -118,8 +142,10 @@ def _unwrap(kek: bytes, slot: dict, name: str) -> bytes:
 
 
 def new_kdf(preset: str = DEFAULT_KDF, uses_keyfile: bool = False) -> dict:
-    log_n, r, p = KDF_PRESETS[preset]
-    return {"alg": "scrypt", "log_n": log_n, "r": r, "p": p, "salt": b64e(secrets.token_bytes(32)), "keyfile": uses_keyfile}
+    kdf = dict(KDF_PRESETS[preset])
+    kdf["salt"] = b64e(secrets.token_bytes(32))
+    kdf["keyfile"] = uses_keyfile
+    return kdf
 
 
 def create_keys(password: str, keyfile: bytes | None = None, preset: str = DEFAULT_KDF,

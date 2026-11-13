@@ -363,3 +363,62 @@ def test_recover_tool_unseals_v2(vault, vpath, tmp_path):
     row = sqlite3.connect(out).execute("SELECT password,description,totp,extra,fields FROM items").fetchone()
     assert row[:3] == ("PWD-marker-111", "DESC-marker-222", "JBSWY3DPEHPK3PXP")
     assert "CVV-marker-333" in row[3] and "FLD-marker-555" in row[4]
+
+
+# ------------------------------------------------------------------ Argon2id / legacy scrypt
+def test_new_vaults_use_argon2id_and_old_scrypt_vaults_still_open(tmp_path):
+    p1, p2 = str(tmp_path / "a.pwdeck"), str(tmp_path / "s.pwdeck")
+    a, rka = Vault.create(p1, "pw", kdf="fast")
+    s, rks = Vault.create(p2, "pw", kdf="scrypt-fast")
+    assert not a.kdf_is_legacy and "Argon2id" in a.kdf_info and s.kdf_is_legacy and "scrypt" in s.kdf_info
+    a.add_item(Item(name="x", password="p"))
+    s.add_item(Item(name="x", password="p"))
+    a.close()
+    s.close()
+    assert "Argon2id" in Vault.peek(p1)["kdf"] and "scrypt" in Vault.peek(p2)["kdf"]
+    for p, rk in ((p1, rka), (p2, rks)):
+        v = Vault.open(p, "pw")
+        assert v.items(secrets=True)[0].password == "p"
+        v.close()
+        with pytest.raises(WrongPasswordError):
+            Vault.open(p, "nope")
+        Vault.open(p, recovery_key=rk).close()
+
+
+def test_upgrade_scrypt_vault_to_argon2id_keeps_recovery_and_content(tmp_path):
+    p = str(tmp_path / "s.pwdeck")
+    v, rk = Vault.create(p, "pw", kdf="scrypt-fast")
+    v.add_item(Item(name="x", password="secret"))
+    v.change_password("pw", None, "fast")                      # same password, new derivation
+    assert not v.kdf_is_legacy
+    v.close()
+    v = Vault.open(p, "pw")
+    assert v.reveal(v.items()[0].id, "password") == "secret" and "Argon2id" in v.kdf_info
+    v.close()
+    Vault.open(p, recovery_key=rk).close()
+
+
+def test_hostile_kdf_parameters_are_rejected(tmp_path):
+    p = str(tmp_path / "h.pwdeck")
+    Vault.create(p, "pw", kdf="fast")[0].close()
+    header, ct = crypto.parse(open(p, "rb").read())
+    for patch in ({"m": 1 << 30}, {"t": 0}, {"p": 99}, {"m": 4}, {"alg": "md5"}):
+        h = {**header, "kdf": {**header["kdf"], **patch}}
+        with pytest.raises(CorruptVaultError):
+            crypto.unlock(h, "pw")
+
+
+def test_recover_tool_handles_scrypt_vaults_too(tmp_path):
+    p = str(tmp_path / "s.pwdeck")
+    v, _ = Vault.create(p, "pw", kdf="scrypt-fast")
+    v.add_item(Item(name="Mail", password="pw-123"))
+    v.close()
+    tool = os.path.join(os.path.dirname(__file__), "..", "pwdeck", "recover.py")
+    out = str(tmp_path / "o.sqlite")
+    r = subprocess.run([sys.executable, "-c",
+                        f"import getpass,sys; getpass.getpass=lambda p='': 'pw'; sys.argv=['x','decrypt',{p!r},'-o',{out!r}];"
+                        f"import runpy; runpy.run_path({tool!r}, run_name='__main__')"], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    assert sqlite3.connect(out).execute("SELECT password FROM items").fetchone() == ("pw-123",)
+    info = subprocess.run([sys.executable, tool, "info", p], capture_output=True, text=True)
+    assert "scrypt" in info.stdout

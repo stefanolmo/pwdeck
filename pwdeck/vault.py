@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from . import crypto
 from .crypto import (CorruptVaultError, NotAVaultError, VaultError, WrongPasswordError)  # noqa: F401  (re-exported)
-from .types import COLUMN_KEYS
+from .itemtypes import COLUMN_KEYS
 
 SCHEMA_VERSION = 2          # 2 = secret columns hold sealed (field-encrypted) values; 1 = plaintext columns (migrated on open)
 SCHEMA = """
@@ -190,7 +190,7 @@ class Vault:
         with open(path, "rb") as f:
             header, _ = crypto.parse(f.read())
         return {"keyfile": bool(header["kdf"].get("keyfile")), "recovery": "recovery" in header["slots"],
-                "kdf": f"scrypt N=2^{header['kdf']['log_n']}"}
+                "kdf": crypto.kdf_description(header["kdf"])}
 
     def close_quietly(self) -> None:
         with contextlib.suppress(Exception):
@@ -304,6 +304,14 @@ class Vault:
             return crypto.unlock(self._header, password, keyfile) == self._dek
         except WrongPasswordError:
             return False
+
+    @property
+    def kdf_info(self) -> str:
+        return crypto.kdf_description(self._header["kdf"])
+
+    @property
+    def kdf_is_legacy(self) -> bool:
+        return self._header["kdf"].get("alg") != "argon2id"
 
     @property
     def uses_keyfile(self) -> bool:

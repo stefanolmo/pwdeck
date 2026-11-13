@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QScroll
 from . import theme, totp
 from .dialogs import fmt_ts
 from .theme import icon
-from .types import type_fields, type_label
+from .itemtypes import type_fields, type_label
 from .vault import Item
 from .widgets import Card, TotpDisplay, mini_button
 

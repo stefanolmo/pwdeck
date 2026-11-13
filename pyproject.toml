@@ -9,7 +9,7 @@ description = "Local password manager with an encrypted single-file SQLite vault
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-dependencies = ["PySide6-Essentials>=6.5", "cryptography>=41"]
+dependencies = ["PySide6-Essentials>=6.5", "cryptography>=46"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
